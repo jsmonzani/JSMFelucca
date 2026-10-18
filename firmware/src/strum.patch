@@ -1,0 +1,253 @@
+diff -ru a/core.h b/core.h
+--- a/core.h	2026-10-18 15:12:31.274280836 +0000
++++ b/core.h	2026-10-18 15:12:31.508785150 +0000
+@@ -70,10 +70,21 @@
+     P_FTYPE,                                   /* 1.5 (#104): ANALOG's filter TYPE, LP (as before) / BP / HP (eng_analog.c) */
+     P_ESYNC,                                   /* 1.5 (#175): ENV SYNC: ATK DEC REL as note values of the tempo (voice.c) */
+     P_NPOLY,                                   /* POLY voices of the part, 1..NVOICE (NVOICE: no limit); the newest notes win (voice.c) */
++    P_STRUM,                                   /* STRUM: the notes of a step one after the other, -64..64 (0 = together; + low to
++                                                * high, - high to low), the gap on strum_ms10's curve (seq.c seq_step, strum_tick) */
+     P_E0, P_E1, P_E2, P_E3, P_E4, P_E5, P_E6, P_E7,
+     P_COUNT
+ };
+ 
++/* P_STRUM -> the gap between two strummed notes in 1/10 ms: (v / 64)^2 of 2 s, so it is fine near 0 (v 1 = 0.5 ms,
++ * 10 = 49 ms, 32 = 0.5 s) and 2 s at +-64. Integer only; seq.c (the gap in samples) and params.c (the display) read it */
++static uint32_t strum_ms10(int32_t v)
++{
++    uint32_t a = (uint32_t)(v < 0 ? -v : v);
++    a = a > 64u ? 64u : a;
++    return (a * a * 20000u + 2048u) / 4096u;
++}
++
+ enum {                          /* global parameters */
+     G_BPM, G_SWING, G_CLOCK, G_TUNE,
+     G_DTIME, G_DFDBK, G_DCOLOR, G_DMIX,
+diff -ru a/params.c b/params.c
+--- a/params.c	2026-10-18 15:12:31.277273809 +0000
++++ b/params.c	2026-10-18 15:12:31.509193189 +0000
+@@ -166,6 +166,7 @@
+     [P_FTYPE] = PE("TYPE", N_FTYPE, 0),           /* 1.5 (#104): ANALOG's filter, LP = as before (eng_analog.c) */
+     [P_ESYNC] = PE("ESYNC", N_ONOFF, 0),          /* 1.5 (#175): OFF = ATK DEC REL in ms, as before (voice.c esync) */
+     [P_NPOLY] = PD("POLY", F_INT, 1, NVOICE, NVOICE),   /* POLY voices of the part: NVOICE = no limit, as before (voice.c trk_npoly) */
++    [P_STRUM] = PD("STRUM", F_INT, -64, 64, 0),         /* the gap between a step's notes (strum_ms10), shown by strum_fmt; 0 = OFF */
+ };
+ 
+ /* the INSERT's A B C as its TYPE means them (TP's ranges and defaults): the drives DRIVE TONE LEVEL, CRUSH BITS RATE
+@@ -318,6 +319,30 @@
+     return enum_step(d, v, clamp(v + steps, d->min, d->max));
+ }
+ 
++/* P_STRUM: the gap between two notes of a step, signed (+ low to high, - high to low): 0.1 ms steps under 10 ms, then
++ * ms, then s from 1 s; 0 shows OFF */
++static void strum_fmt(char *val, int32_t v, const char **unit)
++{
++    uint32_t m10 = strum_ms10(v);
++    char t[8];
++    if (!v) {
++        str_cpy(val, "OFF", 6);
++        return;
++    }
++    if (m10 < 100u) {
++        fmt_fix(t, (int32_t)m10, 1);
++        *unit = "ms";
++    } else if (m10 < 10000u) {
++        fmt_int(t, (int32_t)((m10 + 5u) / 10u));
++        *unit = "ms";
++    } else {
++        fmt_fix(t, (int32_t)(m10 / 100u), 2);
++        *unit = "s";
++    }
++    val[0] = v < 0 ? '-' : '+';
++    str_cpy(val + 1, t, 5);
++}
++
+ static uint8_t fmt_named;        /* the last param_format was a name (F_ENUM, even "4"): ui_draw.c's digits do not roll it */
+ 
+ /* value string (<= 5 chars) and unit for a parameter value */
+@@ -415,6 +440,10 @@
+         *unit = "STEP";
+         break;
+     default:
++        if (d == &TP[P_STRUM]) {
++            strum_fmt(val, v, unit);
++            break;
++        }
+         if (d->names) {                               /* F_INT with a 0-terminated name list: the range */
+             uint32_t k = 0;                           /* split evenly over the names (engine desc hooks) */
+             while (d->names[k])
+@@ -476,7 +505,7 @@
+     {"OP LEVEL", FAM_EDIT, SC_TRACK, GR_NONE, {P_FM1_LEVEL, P_FM2_LEVEL, P_FM3_LEVEL, P_FM4_LEVEL}},
+     {"VOICE", FAM_EDIT, SC_TRACK, GR_NONE, {P_VOICE, P_GLIDE, P_GLMODE, P_PRIO}},
+     {"VOICE 2", FAM_EDIT, SC_TRACK, GR_NONE, {P_ALLOC, P_DETUNE, P_PAN, P_MUTE}},
+-    {"VOICE 3", FAM_EDIT, SC_TRACK, GR_NONE, {P_SPRD, P_NPOLY, 0xFF, 0xFF}},   /* #148: SPREAD; POLY voices */
++    {"VOICE 3", FAM_EDIT, SC_TRACK, GR_NONE, {P_SPRD, P_NPOLY, P_STRUM, 0xFF}},   /* #148: SPREAD; POLY voices; STRUM */
+     /* 1.2 (Discussion #153): a family's pages go round in this order, a tap of its button each (ui.c open_family) */
+     {"SONG", FAM_GLO, SC_GLOBAL, GR_SONG, {0xFF, 0xFF, 0xFF, 0xFF}},        /* GLO's only page (1.2; up to 1.1.5 SEQ's) */
+     /* SAVE's taps (1.5, #173): USER (SAVE from another page: the quick save, SAVE OCT+ OCT+), PRESETS (the engines and
+diff -ru a/seq.c b/seq.c
+--- a/seq.c	2026-10-18 15:12:31.462806326 +0000
++++ b/seq.c	2026-10-18 15:12:31.510401985 +0000
+@@ -45,6 +45,10 @@
+  * note (a CHRD chord's other notes). Out of track_t: its size stays as the audio ISR's trk[] indexing wants it */
+ static uint8_t held_key[NTRK][16];
+ static int8_t held_dt[NTRK][16];
++/* STRUM (P_STRUM): the notes of the step playing that are still to come in, one after the other (seq_step queues them,
++ * strum_tick sounds them; the sequencer's release and a panic drop what is left). Out of track_t, as held_key */
++static uint8_t ss_nn[NTRK][4], ss_vv[NTRK][4], ss_n[NTRK], ss_i[NTRK];   /* the notes, velocities, how many, how many in */
++static uint32_t ss_due[NTRK], ss_gap[NTRK];                              /* samples to the next one, between two */
+ static volatile uint8_t kb_asleep;       /* MENU > SCREEN OFF (ui.c): the screen dark or waking, a key pressed now only
+                                           * wakes it (silent, no layer, its release nothing) */
+ static uint8_t last_note = 60;
+@@ -851,6 +855,7 @@
+     t->seq_n = 0;
+     t->seq_hold = 0;
+     t->slide_glide = 0;                             /* live MONO / LEG keys must not glide after it */
++    ss_n[trk_index(t)] = ss_i[trk_index(t)] = 0;    /* a strum still coming in: never (a step's end, a stop, a rest) */
+ }
+ 
+ static void seq_stop(void)
+@@ -914,6 +919,12 @@
+ #define SEQ_REP (1u << 16)
+ #define SEQ_ROLLED (1u << 17)   /* seq_tick rolled the chance already (before the step's parameter locks): it passed */
+ #define SEQ_MISS (1u << 18)     /* .. it failed: nothing plays */
++/* P_STRUM's gap between two notes in samples (strum_ms10, core.h: 1/10 ms), at least 1 */
++static uint32_t strum_gap(int32_t v)
++{
++    uint32_t g = strum_ms10(v) * FS / 10000u;
++    return g ? g : 1u;
++}
+ static __attribute__((noinline)) void seq_step(track_t *t, const step_t *s, uint32_t idx, uint32_t period, uint32_t skip)
+ {
+     uint32_t i, j, gate = period * (uint32_t)t->p[P_SGATE] / 128u;
+@@ -923,7 +934,7 @@
+     uint32_t next_tie = seq_steps(t)[(idx + 1u) % len].time == ST_TIE;
+     uint32_t hits = step_ratchet(s);
+     uint8_t nn[4 + NLANE], vv[4 + NLANE];           /* the notes it plays: its notes, then its hits */
+-    uint32_t m = 0, sk = 0;
++    uint32_t m = 0, sk = 0, mn, qd = 0, span = 0, ti = trk_index(t);   /* mn: the notes (before the hits), qd: STRUM's queued */
+     /* QNT SEQ: the step's notes (not the lane hits) snap to the scale as they play; never on a drum kit, the slices
+      * or another engine that maps the keys itself. SEQ+T (#218): moved by TRN first, as the keys are. seq_notes keeps
+      * the notes that sound: their note-offs match */
+@@ -967,6 +978,7 @@
+         sk |= ((skip >> i) & 1u) << m;
+         m++;
+     }
++    mn = m;
+     for (i = 0; i < NLANE; i++)
+         if ((s->hit >> i) & 1u) {
+             nn[m] = DRUM_LANE_NOTE[i];
+@@ -977,8 +989,35 @@
+     t->slide_glide = (uint8_t)slide_in;
+     if (!slide_in)
+         seq_release(t);
++    ss_n[ti] = ss_i[ti] = 0;                        /* (a strum of the step before still coming in: never) */
++    /* STRUM: the step's notes (not its hits) one after the other, low to high (+) or high to low (-): the first now, the
++     * others by strum_tick, a gap apart. POLY only; never on a kit or an engine that maps the keys itself. A note that
++     * live recording already sounds (sk) is not in it. The gate is longer by the whole strum: the last note keeps it. A
++     * strum the step's end (or a rest) cuts off leaves its last notes out: a TIE, a slower DIV or a shorter STRUM */
++    if (t->p[P_STRUM] && mn > 1u && t->p[P_VOICE] == V_POLY && !e->oneshot && !(e->keys && e->keys(t, 0) >= 0)) {
++        int32_t sv = t->p[P_STRUM];
++        uint8_t ord[4];
++        uint32_t w = 0, q;
++        for (q = 0; q < mn; q++)
++            if (!((sk >> q) & 1u)) {
++                for (j = w; j > 0u && (sv > 0 ? nn[ord[j - 1u]] > nn[q] : nn[ord[j - 1u]] < nn[q]); j--)
++                    ord[j] = ord[j - 1u];
++                ord[j] = (uint8_t)q;
++                w++;
++            }
++        if (w > 1u) {
++            for (q = 1; q < w; q++) {               /* (ord[0] sounds now) */
++                ss_nn[ti][q - 1u] = nn[ord[q]];
++                ss_vv[ti][q - 1u] = vv[ord[q]];
++                qd |= 1u << ord[q];
++            }
++            ss_n[ti] = (uint8_t)(w - 1u);
++            ss_gap[ti] = ss_due[ti] = strum_gap(sv);
++            span = ss_gap[ti] * (w - 1u);
++        }
++    }
+     for (i = 0; i < m; i++)
+-        if (!((sk >> i) & 1u))
++        if (!(((sk | qd) >> i) & 1u))
+             trk_note_on(t, nn[i], vv[i]);
+     if (slide_in)                                   /* release what is not held over */
+         for (i = 0; i < t->seq_n; i++) {
+@@ -991,7 +1030,7 @@
+     for (i = 0; i < m; i++)
+         if (!((sk >> i) & 1u))
+             t->seq_notes[t->seq_n++] = nn[i];
+-    t->seq_off = gate;
++    t->seq_off = gate + span;
+     t->seq_hold = hits == 1u && ((s->flags & SF_SLIDE) != 0 || next_tie);   /* next step a TIE: keep the notes to it */
+ }
+ 
+@@ -1154,6 +1193,23 @@
+     rec_hold(t, t->seq_idx, len);
+ }
+ 
++/* STRUM: the notes of the step still to come in, n samples of real time on (events_block, not seq_tick's n: the gap is
++ * in ms whatever the clock). Each as its time falls in this block; the rest of the block counts towards the next */
++static void strum_tick(track_t *t, uint32_t n)
++{
++    uint32_t ti = trk_index(t);
++    while (ss_i[ti] < ss_n[ti]) {
++        if (ss_due[ti] > n) {
++            ss_due[ti] -= n;
++            return;
++        }
++        n -= ss_due[ti];
++        trk_note_on(t, ss_nn[ti][ss_i[ti]], ss_vv[ti][ss_i[ti]]);
++        ss_i[ti]++;
++        ss_due[ti] = ss_gap[ti];
++    }
++}
++
+ static void seq_tick(track_t *t, uint32_t n)
+ {
+     uint32_t period, len, top;
+@@ -1352,6 +1408,7 @@
+         if ((pr >> i) & 1u) {
+             midi_forget_track(i);
+             trk_all_off(t);
++            ss_n[i] = ss_i[i] = 0;                   /* (a strum still coming in: never) */
+             t->nheld = 0;
+             t->arp_phys = 0;
+             arp_forget(t);
+@@ -1399,8 +1456,10 @@
+     if (aud_req)
+         seq_audition();                               /* (STEP PREVIEW: a step sounds, stopped) */
+     chain_tick(seq_n);
+-    for (i = 0; i < NTRK; i++)
++    for (i = 0; i < NTRK; i++) {
++        strum_tick(&trk[i], n);
+         seq_tick(&trk[i], seq_n);
++    }
+     if (cin_flush)
+         cin_record();
+     if (song.playing)
+diff -ru a/ui.c b/ui.c
+--- a/ui.c	2026-10-18 15:12:31.280057954 +0000
++++ b/ui.c	2026-10-18 15:12:31.509588804 +0000
+@@ -1266,7 +1266,7 @@
+ static int param_kept(uint32_t i)
+ {
+     return i == P_LEVEL || i == P_PAN || i == P_MUTE || (i >= P_AMODE && i <= P_SGATE) ||
+-           (i >= P_SLCR && i <= P_SLDEPTH) || i == P_CHRD || i == P_VOIC || i == P_SQNT || i == P_NPOLY;
++           (i >= P_SLCR && i <= P_SLDEPTH) || i == P_CHRD || i == P_VOIC || i == P_SQNT || i == P_NPOLY || i == P_STRUM;
+ }
+ 
+ /* a retired preset kept as an alias, so stored preset numbers stay valid: SAMPLE 1, once TRANH, is PIANO
+diff -ru a/ui_help.c b/ui_help.c
+--- a/ui_help.c	2026-10-18 15:12:31.284696462 +0000
++++ b/ui_help.c	2026-10-18 15:12:31.509778849 +0000
+@@ -40,7 +40,7 @@
+     {"OPERATOR 2", H_FMOP},
+     {"VOICE", "[K1]POLY, MONO[K2]GLIDE"},
+     {"VOICE 2", "[K2]DETUNE[K3]PAN[K4]MUTE"},
+-    {"VOICE 3", "[K1]SPREAD[K2]POLY VOICES[EDIT]EDIT 1"},
++    {"VOICE 3", "[K1]SPREAD[K2]POLY[K3]STRUM"},
+     {"SONG", "[K1]SECTION[KEYS]A-D[PLAY]SONG"},
+     {"USER", "[K1]SLOT[OCT+]SAVE[SAVE]PRESETS"},
+     {"PRESETS", "[K2]ENGINE[K3]FAV[K4]LIST"},
