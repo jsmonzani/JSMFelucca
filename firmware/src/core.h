@@ -70,9 +70,20 @@ enum {                          /* per-track parameters */
     P_FTYPE,                                   /* 1.5 (#104): ANALOG's filter TYPE, LP (as before) / BP / HP (eng_analog.c) */
     P_ESYNC,                                   /* 1.5 (#175): ENV SYNC: ATK DEC REL as note values of the tempo (voice.c) */
     P_NPOLY,                                   /* POLY voices of the part, 1..NVOICE (NVOICE: no limit); the newest notes win (voice.c) */
+    P_STRUM,                                   /* STRUM: the notes of a step one after the other, -64..64 (0 = together; + low to
+                                                * high, - high to low), the gap on strum_ms10's curve (seq.c seq_step, strum_tick) */
     P_E0, P_E1, P_E2, P_E3, P_E4, P_E5, P_E6, P_E7,
     P_COUNT
 };
+
+/* P_STRUM -> the gap between two strummed notes in 1/10 ms: (v / 64)^2 of 2 s, so it is fine near 0 (v 1 = 0.5 ms,
+ * 10 = 49 ms, 32 = 0.5 s) and 2 s at +-64. Integer only; seq.c (the gap in samples) and params.c (the display) read it */
+static uint32_t strum_ms10(int32_t v)
+{
+    uint32_t a = (uint32_t)(v < 0 ? -v : v);
+    a = a > 64u ? 64u : a;
+    return (a * a * 20000u + 2048u) / 4096u;
+}
 
 enum {                          /* global parameters */
     G_BPM, G_SWING, G_CLOCK, G_TUNE,
@@ -311,9 +322,10 @@ typedef struct track {
     uint8_t lfo_wrap;            /* the LFO's phase wrapped this block: its S&H is drawn after the parts (voice.c) */
     uint32_t esync_k[3];         /* ATK's step, DEC's and REL's coefficient (Q16) this block (voice.c esync_coef) */
     uint8_t spread_on;           /* SPREAD this block (fx.c mix_part, voice.c track_render) */
-    uint8_t rsv_sz[1];           /* (sizeof(track_t) a multiple of 16: below) */
+    uint8_t rsv_sz[13];          /* (sizeof(track_t) a multiple of 16: below; was [1] before P_NPOLY and P_STRUM, 4 bytes more
+                                  * in p[]: the next multiple of 16 up) */
 #else
-    uint8_t rsv_sz[14];          /* (sizeof(track_t) a multiple of 16: below) */
+    uint8_t rsv_sz[10];          /* (sizeof(track_t) a multiple of 16: below; was [14] before P_NPOLY and P_STRUM: p[] 4 bytes more) */
 #endif
     int16_t armp, aholdp;        /* P_AMODE / P_AHOLD as last seen by the ISR */
     /* engine switch (voice.c engine_block): the old engine's voices fade out, then it switches */

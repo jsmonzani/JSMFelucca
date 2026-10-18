@@ -40,7 +40,7 @@ static const struct { const char *title, *hint; } HELP_PAGE[] = {
     {"OPERATOR 2", H_FMOP},
     {"VOICE", "[K1]POLY, MONO[K2]GLIDE"},
     {"VOICE 2", "[K2]DETUNE[K3]PAN[K4]MUTE"},
-    {"VOICE 3", "[K1]SPREAD[K2]POLY VOICES[EDIT]EDIT 1"},
+    {"VOICE 3", "[K1]SPREAD[K2]POLY[K3]STRUM"},
     {"SONG", "[K1]SECTION[KEYS]A-D[PLAY]SONG"},
     {"USER", "[K1]SLOT[OCT+]SAVE[SAVE]PRESETS"},
     {"PRESETS", "[K2]ENGINE[K3]FAV[K4]LIST"},

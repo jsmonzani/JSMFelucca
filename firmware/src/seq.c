@@ -45,6 +45,10 @@ static uint8_t kb_vel = 100;             /* 1.5.6 (#84): the keys' velocity (MEN
  * note (a CHRD chord's other notes). Out of track_t: its size stays as the audio ISR's trk[] indexing wants it */
 static uint8_t held_key[NTRK][16];
 static int8_t held_dt[NTRK][16];
+/* STRUM (P_STRUM): the notes of the step playing that are still to come in, one after the other (seq_step queues them,
+ * strum_tick sounds them; the sequencer's release and a panic drop what is left). Out of track_t, as held_key */
+static uint8_t ss_nn[NTRK][4], ss_vv[NTRK][4], ss_n[NTRK], ss_i[NTRK];   /* the notes, velocities, how many, how many in */
+static uint32_t ss_due[NTRK], ss_gap[NTRK];                              /* samples to the next one, between two */
 static volatile uint8_t kb_asleep;       /* MENU > SCREEN OFF (ui.c): the screen dark or waking, a key pressed now only
                                           * wakes it (silent, no layer, its release nothing) */
 static uint8_t last_note = 60;
@@ -851,6 +855,7 @@ static void seq_release(track_t *t)
     t->seq_n = 0;
     t->seq_hold = 0;
     t->slide_glide = 0;                             /* live MONO / LEG keys must not glide after it */
+    ss_n[trk_index(t)] = ss_i[trk_index(t)] = 0;    /* a strum still coming in: never (a step's end, a stop, a rest) */
 }
 
 static void seq_stop(void)
@@ -914,6 +919,12 @@ static int seq_miss(const track_t *t, const step_t *s, uint32_t idx)
 #define SEQ_REP (1u << 16)
 #define SEQ_ROLLED (1u << 17)   /* seq_tick rolled the chance already (before the step's parameter locks): it passed */
 #define SEQ_MISS (1u << 18)     /* .. it failed: nothing plays */
+/* P_STRUM's gap between two notes in samples (strum_ms10, core.h: 1/10 ms), at least 1 */
+static uint32_t strum_gap(int32_t v)
+{
+    uint32_t g = strum_ms10(v) * FS / 10000u;
+    return g ? g : 1u;
+}
 static __attribute__((noinline)) void seq_step(track_t *t, const step_t *s, uint32_t idx, uint32_t period, uint32_t skip)
 {
     uint32_t i, j, gate = period * (uint32_t)t->p[P_SGATE] / 128u;
@@ -923,7 +934,7 @@ static __attribute__((noinline)) void seq_step(track_t *t, const step_t *s, uint
     uint32_t next_tie = seq_steps(t)[(idx + 1u) % len].time == ST_TIE;
     uint32_t hits = step_ratchet(s);
     uint8_t nn[4 + NLANE], vv[4 + NLANE];           /* the notes it plays: its notes, then its hits */
-    uint32_t m = 0, sk = 0;
+    uint32_t m = 0, sk = 0, mn, qd = 0, span = 0, ti = trk_index(t);   /* mn: the notes (before the hits), qd: STRUM's queued */
     /* QNT SEQ: the step's notes (not the lane hits) snap to the scale as they play; never on a drum kit, the slices
      * or another engine that maps the keys itself. SEQ+T (#218): moved by TRN first, as the keys are. seq_notes keeps
      * the notes that sound: their note-offs match */
@@ -967,6 +978,7 @@ static __attribute__((noinline)) void seq_step(track_t *t, const step_t *s, uint
         sk |= ((skip >> i) & 1u) << m;
         m++;
     }
+    mn = m;
     for (i = 0; i < NLANE; i++)
         if ((s->hit >> i) & 1u) {
             nn[m] = DRUM_LANE_NOTE[i];
@@ -977,8 +989,35 @@ static __attribute__((noinline)) void seq_step(track_t *t, const step_t *s, uint
     t->slide_glide = (uint8_t)slide_in;
     if (!slide_in)
         seq_release(t);
+    ss_n[ti] = ss_i[ti] = 0;                        /* (a strum of the step before still coming in: never) */
+    /* STRUM: the step's notes (not its hits) one after the other, low to high (+) or high to low (-): the first now, the
+     * others by strum_tick, a gap apart. POLY only; never on a kit or an engine that maps the keys itself. A note that
+     * live recording already sounds (sk) is not in it. The gate is longer by the whole strum: the last note keeps it. A
+     * strum the step's end (or a rest) cuts off leaves its last notes out: a TIE, a slower DIV or a shorter STRUM */
+    if (t->p[P_STRUM] && mn > 1u && t->p[P_VOICE] == V_POLY && !e->oneshot && !(e->keys && e->keys(t, 0) >= 0)) {
+        int32_t sv = t->p[P_STRUM];
+        uint8_t ord[4];
+        uint32_t w = 0, q;
+        for (q = 0; q < mn; q++)
+            if (!((sk >> q) & 1u)) {
+                for (j = w; j > 0u && (sv > 0 ? nn[ord[j - 1u]] > nn[q] : nn[ord[j - 1u]] < nn[q]); j--)
+                    ord[j] = ord[j - 1u];
+                ord[j] = (uint8_t)q;
+                w++;
+            }
+        if (w > 1u) {
+            for (q = 1; q < w; q++) {               /* (ord[0] sounds now) */
+                ss_nn[ti][q - 1u] = nn[ord[q]];
+                ss_vv[ti][q - 1u] = vv[ord[q]];
+                qd |= 1u << ord[q];
+            }
+            ss_n[ti] = (uint8_t)(w - 1u);
+            ss_gap[ti] = ss_due[ti] = strum_gap(sv);
+            span = ss_gap[ti] * (w - 1u);
+        }
+    }
     for (i = 0; i < m; i++)
-        if (!((sk >> i) & 1u))
+        if (!(((sk | qd) >> i) & 1u))
             trk_note_on(t, nn[i], vv[i]);
     if (slide_in)                                   /* release what is not held over */
         for (i = 0; i < t->seq_n; i++) {
@@ -991,7 +1030,7 @@ static __attribute__((noinline)) void seq_step(track_t *t, const step_t *s, uint
     for (i = 0; i < m; i++)
         if (!((sk >> i) & 1u))
             t->seq_notes[t->seq_n++] = nn[i];
-    t->seq_off = gate;
+    t->seq_off = gate + span;
     t->seq_hold = hits == 1u && ((s->flags & SF_SLIDE) != 0 || next_tie);   /* next step a TIE: keep the notes to it */
 }
 
@@ -1152,6 +1191,23 @@ static __attribute__((noinline)) void seq_enter(track_t *t, uint32_t top, uint32
     if (!t->seq_idx)
         t->cond_loop = (uint8_t)(top || t->cond_loop + 1u >= COND_LOOPS ? 0u : t->cond_loop + 1u);
     rec_hold(t, t->seq_idx, len);
+}
+
+/* STRUM: the notes of the step still to come in, n samples of real time on (events_block, not seq_tick's n: the gap is
+ * in ms whatever the clock). Each as its time falls in this block; the rest of the block counts towards the next */
+static void strum_tick(track_t *t, uint32_t n)
+{
+    uint32_t ti = trk_index(t);
+    while (ss_i[ti] < ss_n[ti]) {
+        if (ss_due[ti] > n) {
+            ss_due[ti] -= n;
+            return;
+        }
+        n -= ss_due[ti];
+        trk_note_on(t, ss_nn[ti][ss_i[ti]], ss_vv[ti][ss_i[ti]]);
+        ss_i[ti]++;
+        ss_due[ti] = ss_gap[ti];
+    }
 }
 
 static void seq_tick(track_t *t, uint32_t n)
@@ -1352,6 +1408,7 @@ static void events_block(uint32_t n)
         if ((pr >> i) & 1u) {
             midi_forget_track(i);
             trk_all_off(t);
+            ss_n[i] = ss_i[i] = 0;                   /* (a strum still coming in: never) */
             t->nheld = 0;
             t->arp_phys = 0;
             arp_forget(t);
@@ -1399,8 +1456,10 @@ static void events_block(uint32_t n)
     if (aud_req)
         seq_audition();                               /* (STEP PREVIEW: a step sounds, stopped) */
     chain_tick(seq_n);
-    for (i = 0; i < NTRK; i++)
+    for (i = 0; i < NTRK; i++) {
+        strum_tick(&trk[i], n);
         seq_tick(&trk[i], seq_n);
+    }
     if (cin_flush)
         cin_record();
     if (song.playing)

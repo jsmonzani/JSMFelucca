@@ -166,6 +166,7 @@ static const param_desc_t TP[P_COUNT] = {
     [P_FTYPE] = PE("TYPE", N_FTYPE, 0),           /* 1.5 (#104): ANALOG's filter, LP = as before (eng_analog.c) */
     [P_ESYNC] = PE("ESYNC", N_ONOFF, 0),          /* 1.5 (#175): OFF = ATK DEC REL in ms, as before (voice.c esync) */
     [P_NPOLY] = PD("POLY", F_INT, 1, NVOICE, NVOICE),   /* POLY voices of the part: NVOICE = no limit, as before (voice.c trk_npoly) */
+    [P_STRUM] = PD("STRUM", F_INT, -64, 64, 0),         /* the gap between a step's notes (strum_ms10), shown by strum_fmt; 0 = OFF */
 };
 
 /* the INSERT's A B C as its TYPE means them (TP's ranges and defaults): the drives DRIVE TONE LEVEL, CRUSH BITS RATE
@@ -318,6 +319,30 @@ static int32_t param_turn(const param_desc_t *d, int32_t v, int32_t steps)
     return enum_step(d, v, clamp(v + steps, d->min, d->max));
 }
 
+/* P_STRUM: the gap between two notes of a step, signed (+ low to high, - high to low): 0.1 ms steps under 10 ms, then
+ * ms, then s from 1 s; 0 shows OFF */
+static void strum_fmt(char *val, int32_t v, const char **unit)
+{
+    uint32_t m10 = strum_ms10(v);
+    char t[8];
+    if (!v) {
+        str_cpy(val, "OFF", 6);
+        return;
+    }
+    if (m10 < 100u) {
+        fmt_fix(t, (int32_t)m10, 1);
+        *unit = "ms";
+    } else if (m10 < 10000u) {
+        fmt_int(t, (int32_t)((m10 + 5u) / 10u));
+        *unit = "ms";
+    } else {
+        fmt_fix(t, (int32_t)(m10 / 100u), 2);
+        *unit = "s";
+    }
+    val[0] = v < 0 ? '-' : '+';
+    str_cpy(val + 1, t, 5);
+}
+
 static uint8_t fmt_named;        /* the last param_format was a name (F_ENUM, even "4"): ui_draw.c's digits do not roll it */
 
 /* value string (<= 5 chars) and unit for a parameter value */
@@ -415,6 +440,10 @@ static void param_format(const param_desc_t *d, int32_t v, char *val, const char
         *unit = "STEP";
         break;
     default:
+        if (d == &TP[P_STRUM]) {
+            strum_fmt(val, v, unit);
+            break;
+        }
         if (d->names) {                               /* F_INT with a 0-terminated name list: the range */
             uint32_t k = 0;                           /* split evenly over the names (engine desc hooks) */
             while (d->names[k])
@@ -476,7 +505,7 @@ static const page_t PAGES[] = {
     {"OP LEVEL", FAM_EDIT, SC_TRACK, GR_NONE, {P_FM1_LEVEL, P_FM2_LEVEL, P_FM3_LEVEL, P_FM4_LEVEL}},
     {"VOICE", FAM_EDIT, SC_TRACK, GR_NONE, {P_VOICE, P_GLIDE, P_GLMODE, P_PRIO}},
     {"VOICE 2", FAM_EDIT, SC_TRACK, GR_NONE, {P_ALLOC, P_DETUNE, P_PAN, P_MUTE}},
-    {"VOICE 3", FAM_EDIT, SC_TRACK, GR_NONE, {P_SPRD, P_NPOLY, 0xFF, 0xFF}},   /* #148: SPREAD; POLY voices */
+    {"VOICE 3", FAM_EDIT, SC_TRACK, GR_NONE, {P_SPRD, P_NPOLY, P_STRUM, 0xFF}},   /* #148: SPREAD; POLY voices; STRUM */
     /* 1.2 (Discussion #153): a family's pages go round in this order, a tap of its button each (ui.c open_family) */
     {"SONG", FAM_GLO, SC_GLOBAL, GR_SONG, {0xFF, 0xFF, 0xFF, 0xFF}},        /* GLO's only page (1.2; up to 1.1.5 SEQ's) */
     /* SAVE's taps (1.5, #173): USER (SAVE from another page: the quick save, SAVE OCT+ OCT+), PRESETS (the engines and
