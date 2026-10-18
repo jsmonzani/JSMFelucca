@@ -121,6 +121,23 @@ static uint32_t trk_vmode(const track_t *t)
     return ENGINES[t->engine]->oneshot ? V_POLY : (uint32_t)t->p[P_VOICE];
 }
 
+/* POLY voices of the part: VOICE 3 > POLY (P_NPOLY, 1..NVOICE; NVOICE = no limit, as before), within the engine's
+ * cap. Only POLY allocation reads it (UNISON keeps trk_nvoice). A voice above the limit (the value lowered while it
+ * sounds) rings out its release; it is no longer given a new note. 0 (a part never set) = no limit */
+static uint32_t trk_npoly(const track_t *t)
+{
+    uint32_t n = trk_nvoice(t), l = (uint32_t)t->p[P_NPOLY];
+    return l >= 1u && l < n ? l : n;
+}
+
+/* the held voice a POLY part protects from stealing: its lowest note (the bass), as always, while it has all its
+ * voices; with a limit set the newest notes win and none is protected. NVOICE = none */
+static uint32_t lowest_held(const track_t *t);
+static uint32_t bass_held(const track_t *t)
+{
+    return trk_npoly(t) == trk_nvoice(t) ? lowest_held(t) : NVOICE;
+}
+
 /* ------------------------------------------------- the shared voice budget --- */
 static uint32_t voices_busy(void)                       /* sounding voices of all parts (not the fading ones) */
 {
@@ -149,7 +166,7 @@ static uint32_t voice_victim(const track_t *self, int soft, track_t **pp)
     for (p = 0; p < NPART; p++) {
         track_t *t = &trk[p];
         uint32_t mode = trk_vmode(t);
-        uint32_t low = mode == V_POLY ? lowest_held(t) : NVOICE;
+        uint32_t low = mode == V_POLY ? bass_held(t) : NVOICE;
         if (soft && t == self)
             continue;
         for (i = 0; i < NVOICE; i++) {
@@ -215,7 +232,7 @@ static voice_t *voice_reuse(track_t *t, voice_t *v)
  * in place instead. */
 static voice_t *voice_alloc(track_t *t, uint32_t note)
 {
-    uint32_t i, np = trk_nvoice(t), best = np, low = np, nfree = 0;
+    uint32_t i, np = trk_npoly(t), best = np, low = np, nfree = 0;
     int32_t bd = 0x7FFFFFFF;
     if (t->engine == ENGI_DRUM) {
         voice_t *v = drum_reuse(t, note);
@@ -258,9 +275,10 @@ static voice_t *voice_alloc(track_t *t, uint32_t note)
     }
     if (best < np)
         return &t->v[best];
-    for (i = 0; i < np; i++)                             /* the lowest held note is protected */
-        if (t->v[i].gate && (low == np || t->v[i].note < t->v[low].note))
-            low = i;
+    if (np == trk_nvoice(t))                             /* the lowest held note is protected (all the voices);  */
+        for (i = 0; i < np; i++)                         /* with a POLY limit the oldest note goes: the newest win */
+            if (t->v[i].gate && (low == np || t->v[i].note < t->v[low].note))
+                low = i;
     for (i = 0; i < np; i++)                             /* oldest released (not one fading out for another part) */
         if (!t->v[i].gate && t->v[i].stage != 4u && (best == np || t->v[i].age < t->v[best].age))
             best = i;
@@ -739,7 +757,7 @@ static uint32_t track_render(track_t *t, int32_t *out, uint32_t n)
         }
         if (!env && !m.amp0 && v->stage == 2 && !e->sampled)
             continue;                                   /* held at a silent sustain (SUS 0): nothing to render */
-        pitch = v->pitch_cur + tune + bend16 + ((lfo * p[P_LD_PIT] * 3) >> 15) + ((m.envq15 * p[P_ED_PIT] * 3) >> 15);
+        pitch = v->pitch_cur + tune + bend16 + (((lfo * p[P_LD_PIT]) >> 3 ) >> 15) + ((m.envq15 * p[P_ED_PIT] * 3) >> 15); // JSM no *3 on LFO it's too much
         m.pitch16 = clamp(pitch, 0, 2047);
         m.inc = pitch_inc(m.pitch16);
         m.fine = v->fine + tune_fine + bend_fine;

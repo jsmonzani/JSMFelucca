@@ -78,7 +78,7 @@ static void shed_voice(void)
     }
     for (p = 0; p < NPART; p++) {
         const track_t *t = &trk[p];
-        uint32_t mode = trk_vmode(t), low = mode == V_POLY ? lowest_held(t) : 0u;
+        uint32_t mode = trk_vmode(t), low = mode == V_POLY ? bass_held(t) : 0u;
         for (i = 0; i < NVOICE; i++) {
             voice_t *v = &trk[p].v[i];
             if (v->active && v->gate && v->stage != 4u &&

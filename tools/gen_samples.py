@@ -9,10 +9,9 @@ naming), single-cycle waves get their root from rate / loop length.
 The ADPCM state at the loop start is stored so loops restart exactly.
 
 Libraries:
-  cc0        assets/samples-cc0/ (tools/fetch_cc0.py, Versilian Studios, CC0):
-             PIANO, FLUTE, SAX (set 1, once TRANH, and set 4, once PERC, are aliases of PIANO).
-             PIANO is the 5-zone piano of 1.0 .. 1.1.5 (1.2 .. 1.4.1 built a reduced 2-zone
-             one at 11,025 Hz; 1.5 went back to the full one, the same bytes as 1.1.5)
+  cc0        assets/samples-cc0/ (CC0; the PIANO folder is SLOOP's, FLUTE is Felucca's):
+             PIANO (SLOOP's grand: its attack, then a steady loop the envelope fades) and FLUTE (Felucca's own).
+             Sets 1 (once TRANH), 3 (once SAX) and 4 (once PERC) are aliases of PIANO.
 SAMPLE's factory presets end before set 4 (SMP_PERC_SLOT); every sample set and SET / USR
 index stays in its original place.
 A retired set keeps its index as an alias: the original's name and zones (no data), and a
@@ -65,12 +64,13 @@ CACHE = SRC / "build" / "gen_samples.cache"
 CC0 = SRC / "assets" / "samples-cc0"
 TR = 22050                                   # stored sample rate
 
-# CC0 library: set -> kind ("oneshot" decaying, "sus" looped sustain, "kit" one sample per key)
-# Built-in sets (piano, flute, sax); the other slots of the 8 are for the user (USR1-3, loaded
+# CC0 library: set -> kind ("oneshot" decaying, "sus" looped sustain, "piano" its attack then a steady loop
+# that the envelope fades, "kit" one sample per key)
+# Built-in sets (piano, flute); the other slots of the 8 are for the user (USR1-3, loaded
 # from the web editor). TRANH was removed (66 KB of flash); its index 1 stays, an alias of PIANO
-# ("alias": the set named). PERC (the GM kit) was removed (66 KB); its index 4 stays, an alias of
+# ("alias": the set named). SAX was replaced by TARDI. PERC (the GM kit) was removed (66 KB); its index 4 stays, an alias of
 # PIANO too (PERC_SLOT; its sounds load as the DRUM engine)
-CC0_SETS = [("PIANO", "oneshot"), ("PIANO", "alias"), ("FLUTE", "sus"), ("SAX", "sus"), ("PIANO", "alias")]
+CC0_SETS = [("PIANO", "piano"), ("PIANO", "alias"), ("FLUTE", "sus"), ("TARDI", "sus"), ("PIANO", "alias")]
 PERC_SLOT = 4                                # core.h SMP_SET_PERC: SAMPLE's factory presets end before it
 MEASURED_TUNING = ()                         # sets whose recordings are not at A440 (was TRANH, ~+35 ct)
 
@@ -99,18 +99,27 @@ SLC_GRID, SLC_AUTO = 128, 32                # eng_slice.c slc_src_t
 ENV = {"wave":(5, 80, 100, 50), "kit": (0, 127, 127, 60), "multi": (0, 85, 0, 75),
        "oneshot": (0, 127, 127, 70), "sus": (12, 80, 120, 60)}
 
-# PIANO's notes cut to 0.75 s (saves flash), faded out over the last SET_FADE s
-SET_KEEP = {"PIANO": 0.75}
-SET_FADE = {"PIANO": 0.15}
+# the preset of PIANO (SLOOP's): name, {SET (filled in), TUNE, BITS, LOOP (filled in), CUT, -, DRV, -},
+# env, mono, sends (DIST, CHORUS, DELAY, REVERB), more (track parameter, value) pairs (preset_t.x)
+SET_PRESETS = {
+    "PIANO": ("GRAND PNO", [0, 0, 0, 0, 127, 0, 0, 0], (0, 110, 0, 58), 0, (0, 6, 8, 24), ()),
+}
+
+
+PRESET_HAS_X = False
+
+
+def preset_row(i, k, pname, e, env, mono, fx, more):
+    """one SMP_PRESET_TABLE initializer for set i"""
+    e = list(e)
+    e[0], e[3] = i, 0 if k == "kit" else 1
+    # felucca's preset_t has no `.x` (extra track parameters): set PRESET_HAS_X once it does
+    x = ", ".join(f"{more[j]} + 1, {more[j + 1]}" for j in range(0, len(more), 2)) if PRESET_HAS_X else ""
+    return (f'    {{"{pname}", {{{", ".join(map(str, e))}}}, {{{", ".join(map(str, env))}}}, 0, {mono}, '
+            f'FX({", ".join(map(str, fx))}){", .x = {" + x + "}" if x else ""}}},')
+
 
 _wavs = {}
-
-
-def cos_fade(x, fade):
-    """fade the last `fade` samples of x out on a raised cosine (no corner at either end)"""
-    n = len(x)
-    for i in range(fade):
-        x[n - fade + i] *= 0.5 + 0.5 * math.cos(math.pi * (i + 1) / fade)
 
 
 def wav(path):
@@ -126,32 +135,31 @@ def name_note(name):
     return (int(m.group(2)), NOTE[m.group(1)]) if m else None
 
 
-def octave_conv(files):
-    """octave convention of a set's files (C4 = 60: 1, C3 = 60: 2): YIN votes, the names give the notes"""
-    votes = {1: 0, 2: 0}
-    for p in files:
-        nn = name_note(p.name)
-        if not nn:
-            continue
-        sr, x = wav(p)
-        det = hz_to_midi(detect_hz(x[onset(x):], sr))
-        for o in (1, 2):
-            if abs(det - ((nn[0] + o) * 12 + nn[1])) < 1.0:
-                votes[o] += 1
-    return 2 if votes[2] >= votes[1] else 1
-
-
 def cc0_entries(setname, kind):
     """-> [(file name, int16 samples at TR, loop or None, root)]"""
     files = sorted((CC0 / setname).glob("*.wav"))
-    out = []
-    if kind != "kit":
-        conv = octave_conv(files)
+    out, conv = [], 1
+    if kind != "kit" and not all(re.search(r"_m\d+\.wav$", p.name) for p in files):
+        # octave convention of this set (C4 = 60 or C3 = 60): YIN votes, the names give the notes
+        votes = {1: 0, 2: 0}
+        for p in files:
+            nn = name_note(p.name)
+            if not nn:
+                continue
+            sr, x = wav(p)
+            det = hz_to_midi(detect_hz(x[onset(x):], sr))
+            for o in (1, 2):
+                if abs(det - ((nn[0] + o) * 12 + nn[1])) < 1.0:
+                    votes[o] += 1
+        conv = 2 if votes[2] >= votes[1] else 1
     for k, p in enumerate(files):
         sr, x = wav(p)
         x = x[max(0, onset(x) - 16):]
         nn = name_note(p.name)
-        if kind == "kit":
+        given = re.search(r"_m(\d+)\.wav$", p.name)
+        if given and kind != "kit":
+            root = int(given.group(1))                  # (the file says it)
+        elif kind == "kit":
             root = KIT_BASE + k
         elif nn:
             root = (nn[0] + conv) * 12 + nn[1]
@@ -162,26 +170,49 @@ def cc0_entries(setname, kind):
         else:
             root = hz_to_midi(detect_hz(x, sr))
         x = resample(x, sr, TR)
-        keep = SET_KEEP.get(setname) or {"oneshot": 1.0, "sus": 0.95, "kit": 0.6}[kind]
+        keep = {"oneshot": 1.0, "sus": 0.95, "kit": 0.6, "piano": 1.0}[kind]
         x = x[:int(keep * TR)]
         n = len(x)
-        if kind == "sus":                            # crossfaded sustain loop in the steady part
+        if kind == "piano":                          # the attack, then a steady tone the envelope (DEC) fades:
+            ls, le, xf, a0 = int(0.55 * TR), n - 1, int(0.08 * TR), int(0.30 * TR)   # long notes in 1 s
+            w = int(0.02 * TR)
+            env = [max(1e-6, (sum(v * v for v in x[max(0, i - w):i + w]) / (2 * w)) ** 0.5) for i in range(0, n, w)]
+            ref = env[a0 // w]
+            x = [v * (ref / env[min(len(env) - 1, i // w)] if i >= a0 else 1.0) for i, v in enumerate(x)]
+            ls = best_loop_start(x, le, xf, int(0.45 * TR), int(0.65 * TR))   # (the tone in phase: no dip)
+            for i in range(xf):
+                a = i / xf
+                x[le - xf + i] = x[le - xf + i] * (1 - a) + x[ls - xf + i] * a
+            loop = (ls, le)
+        elif kind == "sus":                          # crossfaded sustain loop in the steady part
             ls, le, xf = int(0.40 * TR), n - 1, int(0.06 * TR)
             for i in range(xf):
                 a = i / xf
                 x[le - xf + i] = x[le - xf + i] * (1 - a) + x[ls - xf + i] * a
             loop = (ls, le)
         else:
-            if setname in SET_FADE:                  # a shortened set: a long raised-cosine fade-out
-                cos_fade(x, int(SET_FADE[setname] * TR))
-            else:
-                fade = int(0.08 * TR)
-                for i in range(fade):
-                    x[n - fade + i] *= 1 - i / fade
+            fade = int(0.08 * TR)
+            for i in range(fade):
+                x[n - fade + i] *= 1 - i / fade
             loop = None
         pk = peak(x)
         out.append((p.name, [int(v * 30000 / pk) for v in x], loop, root))
     return out
+
+
+def best_loop_start(x, le, xf, lo, hi):
+    """the loop start in [lo, hi) whose last xf samples look most like the loop end's (correlation, on
+    every 4th sample, every 2nd start: plain Python, no numpy): the crossfade then joins two copies of the
+    same wave, not two phases that cancel"""
+    tail = x[le - xf:le:4]
+    tn = sum(v * v for v in tail) ** 0.5 + 1e-9
+    best, bl = -2.0, (lo + hi) // 2
+    for ls in range(lo, hi, 2):
+        seg = x[ls - xf:ls:4]
+        c = sum(a * b for a, b in zip(seg, tail)) / ((sum(v * v for v in seg) ** 0.5 + 1e-9) * tn)
+        if c > best:
+            best, bl = c, ls
+    return bl
 
 
 def gm_role(name):
@@ -277,14 +308,14 @@ class Builder:
     def slice_piano(self):
         """SLICE's PIANO: the PIANO set's SLC_PIANO_NOTE zone (its data, no copy); its slice table: decoder states
         at k * len / SLC_GRID, one AUTO slice at 0 (a single note has one attack)"""
-        z = next((z for name, z0, nz in self.sets if name == "PIANO"
-                  for z in self.zones[z0:z0 + nz] if z["root16"] == SLC_PIANO_NOTE * 16), None)
+        zs = [z for name, z0, nz in self.sets if name == "PIANO" for z in self.zones[z0:z0 + nz]]
+        z = min(zs, key=lambda z: abs(z["root16"] - SLC_PIANO_NOTE * 16), default=None)   # (middle C itself if there)
         if not z:
             return
         off, n = z["off"], z["n"]
         data = self.blob[off:off + (n + 1) // 2]
         grid = ima_states(data, [k * n // SLC_GRID for k in range(SLC_GRID)])
-        self.pno = dict(off=off, n=n, grid=grid, apos=[0], ast=ima_states(data, [0]))
+        self.pno = dict(off=off, n=n, grid=grid, apos=[0], ast=ima_states(data, [0]), note=int(round(z["root16"] / 16)))
 
     def add(self, s, loop_start):
         """ADPCM-encode s into the blob (each sample starts on an even offset) -> (offset, state at loop_start)"""
@@ -360,10 +391,13 @@ class Builder:
         L.append("static const preset_t SMP_PRESET_TABLE[] = {")
         for i, (name, _, _) in enumerate(named):
             k = self.kinds.get(name, "wave")
+            si = self.alias.get(i, i)                   # an alias: the original's preset (hidden by its name)
+            if name in SET_PRESETS:                     # PIANO: SLOOP's preset
+                L.append(preset_row(si, k, *SET_PRESETS[name]))
+                continue
             a, d, s_, r = ENV[k]
             loop = 0 if k == "kit" else 1
             pat = ", PAT(12)" if k == "kit" else ""     # a kit: engines.c PATTERNS[11] BEAT
-            si = self.alias.get(i, i)                   # an alias: the original's preset (hidden by its name)
             L.append(f'    {{"{name}", {{{si}, 0, 0, {loop}, 127, 0, 0, 0}}, {{{a}, {d}, {s_}, {r}}}, 0, 0{pat}}},')
         L.append("};")
         orig = [self.alias.get(i, i) for i in range(len(named))]
@@ -403,8 +437,8 @@ class Builder:
         b = self.pno
         if not b:
             return ["#define SLC_PIANO_INIT {0}"]
-        return ["", f"/* SLICE's PIANO: the PIANO zone of MIDI {SLC_PIANO_NOTE} ({b['n']} samples at SMP_DATA[{b['off']}]) */",
-                f"#define SLC_PIANO_NOTE {SLC_PIANO_NOTE}"] + self.slc_init("SLC_PIANO_INIT", b)
+        return ["", f"/* SLICE's PIANO: the PIANO zone of MIDI {b['note']} ({b['n']} samples at SMP_DATA[{b['off']}]) */",
+                f"#define SLC_PIANO_NOTE {b['note']}"] + self.slc_init("SLC_PIANO_INIT", b)
 
     def summary(self):
         brk = f", SLICE BREAK {self.brk['n']} samples" if self.brk else ""

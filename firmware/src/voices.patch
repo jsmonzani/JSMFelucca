@@ -1,0 +1,126 @@
+diff -ru a/audio.c b/audio.c
+--- a/audio.c	2026-10-18 07:59:17.214724995 +0000
++++ b/audio.c	2026-10-18 07:59:17.556524114 +0000
+@@ -78,7 +78,7 @@
+     }
+     for (p = 0; p < NPART; p++) {
+         const track_t *t = &trk[p];
+-        uint32_t mode = trk_vmode(t), low = mode == V_POLY ? lowest_held(t) : 0u;
++        uint32_t mode = trk_vmode(t), low = mode == V_POLY ? bass_held(t) : 0u;
+         for (i = 0; i < NVOICE; i++) {
+             voice_t *v = &trk[p].v[i];
+             if (v->active && v->gate && v->stage != 4u &&
+diff -ru a/core.h b/core.h
+--- a/core.h	2026-10-18 07:59:17.318724996 +0000
++++ b/core.h	2026-10-18 07:59:17.553573258 +0000
+@@ -69,6 +69,7 @@
+     P_ITYPE, P_IA, P_IB, P_IC, P_IMIX,         /* 1.5 (#78, #177): the INSERT, its TYPE, three values and MIX (fx.c) */
+     P_FTYPE,                                   /* 1.5 (#104): ANALOG's filter TYPE, LP (as before) / BP / HP (eng_analog.c) */
+     P_ESYNC,                                   /* 1.5 (#175): ENV SYNC: ATK DEC REL as note values of the tempo (voice.c) */
++    P_NPOLY,                                   /* POLY voices of the part, 1..NVOICE (NVOICE: no limit); the newest notes win (voice.c) */
+     P_E0, P_E1, P_E2, P_E3, P_E4, P_E5, P_E6, P_E7,
+     P_COUNT
+ };
+diff -ru a/params.c b/params.c
+--- a/params.c	2026-10-18 07:59:17.327411135 +0000
++++ b/params.c	2026-10-18 07:59:17.553945173 +0000
+@@ -165,6 +165,7 @@
+     [P_IMIX] = PD("MIX", F_PCT, 0, 127, 127),
+     [P_FTYPE] = PE("TYPE", N_FTYPE, 0),           /* 1.5 (#104): ANALOG's filter, LP = as before (eng_analog.c) */
+     [P_ESYNC] = PE("ESYNC", N_ONOFF, 0),          /* 1.5 (#175): OFF = ATK DEC REL in ms, as before (voice.c esync) */
++    [P_NPOLY] = PD("POLY", F_INT, 1, NVOICE, NVOICE),   /* POLY voices of the part: NVOICE = no limit, as before (voice.c trk_npoly) */
+ };
+ 
+ /* the INSERT's A B C as its TYPE means them (TP's ranges and defaults): the drives DRIVE TONE LEVEL, CRUSH BITS RATE
+@@ -475,7 +476,7 @@
+     {"OP LEVEL", FAM_EDIT, SC_TRACK, GR_NONE, {P_FM1_LEVEL, P_FM2_LEVEL, P_FM3_LEVEL, P_FM4_LEVEL}},
+     {"VOICE", FAM_EDIT, SC_TRACK, GR_NONE, {P_VOICE, P_GLIDE, P_GLMODE, P_PRIO}},
+     {"VOICE 2", FAM_EDIT, SC_TRACK, GR_NONE, {P_ALLOC, P_DETUNE, P_PAN, P_MUTE}},
+-    {"VOICE 3", FAM_EDIT, SC_TRACK, GR_NONE, {P_SPRD, 0xFF, 0xFF, 0xFF}},   /* #148: SPREAD */
++    {"VOICE 3", FAM_EDIT, SC_TRACK, GR_NONE, {P_SPRD, P_NPOLY, 0xFF, 0xFF}},   /* #148: SPREAD; POLY voices */
+     /* 1.2 (Discussion #153): a family's pages go round in this order, a tap of its button each (ui.c open_family) */
+     {"SONG", FAM_GLO, SC_GLOBAL, GR_SONG, {0xFF, 0xFF, 0xFF, 0xFF}},        /* GLO's only page (1.2; up to 1.1.5 SEQ's) */
+     /* SAVE's taps (1.5, #173): USER (SAVE from another page: the quick save, SAVE OCT+ OCT+), PRESETS (the engines and
+diff -ru a/ui.c b/ui.c
+--- a/ui.c	2026-10-18 07:59:17.438724997 +0000
++++ b/ui.c	2026-10-18 07:59:17.555816400 +0000
+@@ -1266,7 +1266,7 @@
+ static int param_kept(uint32_t i)
+ {
+     return i == P_LEVEL || i == P_PAN || i == P_MUTE || (i >= P_AMODE && i <= P_SGATE) ||
+-           (i >= P_SLCR && i <= P_SLDEPTH) || i == P_CHRD || i == P_VOIC || i == P_SQNT;
++           (i >= P_SLCR && i <= P_SLDEPTH) || i == P_CHRD || i == P_VOIC || i == P_SQNT || i == P_NPOLY;
+ }
+ 
+ /* a retired preset kept as an alias, so stored preset numbers stay valid: SAMPLE 1, once TRANH, is PIANO
+diff -ru a/ui_help.c b/ui_help.c
+--- a/ui_help.c	2026-10-18 07:59:17.530724998 +0000
++++ b/ui_help.c	2026-10-18 07:59:17.556069063 +0000
+@@ -40,7 +40,7 @@
+     {"OPERATOR 2", H_FMOP},
+     {"VOICE", "[K1]POLY, MONO[K2]GLIDE"},
+     {"VOICE 2", "[K2]DETUNE[K3]PAN[K4]MUTE"},
+-    {"VOICE 3", "[K1]STEREO SPREAD[EDIT]EDIT 1"},
++    {"VOICE 3", "[K1]SPREAD[K2]POLY VOICES[EDIT]EDIT 1"},
+     {"SONG", "[K1]SECTION[KEYS]A-D[PLAY]SONG"},
+     {"USER", "[K1]SLOT[OCT+]SAVE[SAVE]PRESETS"},
+     {"PRESETS", "[K2]ENGINE[K3]FAV[K4]LIST"},
+diff -ru a/voice.c b/voice.c
+--- a/voice.c	2026-10-18 07:59:17.130724994 +0000
++++ b/voice.c	2026-10-18 07:59:17.556355676 +0000
+@@ -121,6 +121,23 @@
+     return ENGINES[t->engine]->oneshot ? V_POLY : (uint32_t)t->p[P_VOICE];
+ }
+ 
++/* POLY voices of the part: VOICE 3 > POLY (P_NPOLY, 1..NVOICE; NVOICE = no limit, as before), within the engine's
++ * cap. Only POLY allocation reads it (UNISON keeps trk_nvoice). A voice above the limit (the value lowered while it
++ * sounds) rings out its release; it is no longer given a new note. 0 (a part never set) = no limit */
++static uint32_t trk_npoly(const track_t *t)
++{
++    uint32_t n = trk_nvoice(t), l = (uint32_t)t->p[P_NPOLY];
++    return l >= 1u && l < n ? l : n;
++}
++
++/* the held voice a POLY part protects from stealing: its lowest note (the bass), as always, while it has all its
++ * voices; with a limit set the newest notes win and none is protected. NVOICE = none */
++static uint32_t lowest_held(const track_t *t);
++static uint32_t bass_held(const track_t *t)
++{
++    return trk_npoly(t) == trk_nvoice(t) ? lowest_held(t) : NVOICE;
++}
++
+ /* ------------------------------------------------- the shared voice budget --- */
+ static uint32_t voices_busy(void)                       /* sounding voices of all parts (not the fading ones) */
+ {
+@@ -149,7 +166,7 @@
+     for (p = 0; p < NPART; p++) {
+         track_t *t = &trk[p];
+         uint32_t mode = trk_vmode(t);
+-        uint32_t low = mode == V_POLY ? lowest_held(t) : NVOICE;
++        uint32_t low = mode == V_POLY ? bass_held(t) : NVOICE;
+         if (soft && t == self)
+             continue;
+         for (i = 0; i < NVOICE; i++) {
+@@ -215,7 +232,7 @@
+  * in place instead. */
+ static voice_t *voice_alloc(track_t *t, uint32_t note)
+ {
+-    uint32_t i, np = trk_nvoice(t), best = np, low = np, nfree = 0;
++    uint32_t i, np = trk_npoly(t), best = np, low = np, nfree = 0;
+     int32_t bd = 0x7FFFFFFF;
+     if (t->engine == ENGI_DRUM) {
+         voice_t *v = drum_reuse(t, note);
+@@ -258,9 +275,10 @@
+     }
+     if (best < np)
+         return &t->v[best];
+-    for (i = 0; i < np; i++)                             /* the lowest held note is protected */
+-        if (t->v[i].gate && (low == np || t->v[i].note < t->v[low].note))
+-            low = i;
++    if (np == trk_nvoice(t))                             /* the lowest held note is protected (all the voices);  */
++        for (i = 0; i < np; i++)                         /* with a POLY limit the oldest note goes: the newest win */
++            if (t->v[i].gate && (low == np || t->v[i].note < t->v[low].note))
++                low = i;
+     for (i = 0; i < np; i++)                             /* oldest released (not one fading out for another part) */
+         if (!t->v[i].gate && t->v[i].stage != 4u && (best == np || t->v[i].age < t->v[best].age))
+             best = i;
