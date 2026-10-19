@@ -531,17 +531,51 @@ static void rec_note(track_t *t, uint32_t note, uint32_t vel)
     step_t *s;
     uint8_t ch[4], keep[4];
     uint32_t nc, nk = 0;
-
+    /* the step's notes play later in this pass (it is the next one, not played early yet, or the one playing whose
+     * nudge has not come yet): what sounds now must not play again there (rskip) */
     if (next)
         idx = (idx + 1u) % len;
     s = &t->step[idx];
     
     sounds = next ? t->nd_fired != idx + 1u : t->nd_late != ND_NONE;
     
-    if (drum_track(t)) {
-        // ... (conservez votre logique existante pour les drums si nécessaire, ou laissez-la intacte)
+    if (drum_track(t)) {                            /* DRUM: into the grid, no holds (hits) */
+        uint32_t l = drum_lane(note);
+        if (s->time != ST_NOTE || (!s->n && !s->hit)) {
+            s->n = s->hit = s->acc = 0;
+            s->flags = 0;
+            s->vel = 0;
+            step_set_nudge(s, off);
+        }
+        s->time = ST_NOTE;
+        if (note == DRUM_LANE_NOTE[l]) {            /* a lane's note: its hit */
+            s->hit |= (uint8_t)(1u << l);
+            if (vel > 110)
+                s->acc |= (uint8_t)(1u << l);
+        } else {                                    /* another GM drum (a low tom, a crash): a note */
+            for (k = 0; k < s->n && s->note[k] != note; k++)
+                ;
+            if (k == s->n) {
+                if (s->n < 4u)
+                    s->n++;
+                s->note[s->n - 1u] = (uint8_t)note;
+            }
+            if (vel > 110)
+                s->flags |= SF_ACCENT;
+        }
+        if (vel > s->vel)
+            s->vel = (uint8_t)vel;
+        t->seq_active = 1;
+        if (sounds) {
+            if (t->rskip_idx != idx)
+                t->rskip_n = 0;
+            t->rskip_idx = (uint8_t)idx;
+            if (t->rskip_n < NLANE)
+                t->rskip[t->rskip_n++] = (uint8_t)note;
+        }
         return;
     }
+
 
     // Correction de l'overdub sur les pas liés (ST_TIE) en mode polyphonique
     if (trk_vmode(t) == V_POLY && s->time == ST_TIE && (nc = chain_notes(t, idx, ch)) != 0) {
