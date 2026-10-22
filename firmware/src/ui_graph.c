@@ -1689,6 +1689,10 @@ static void track_strip(uint32_t c, uint32_t sel, uint32_t st, uint32_t mute, ui
 static void draw_tracks(void)
 {
     uint32_t c, sk = strip_kind() == SK_TRK;
+    if (sk) { /* JSM no tracks view meters on LARGE*/
+        return;
+    }
+    
     if (ui.force) {                                  /* the BG beside the columns only, they cover the rest (#181: */
         draw_gaps(graph_y(), graph_h());             /* the whole panel cleared first flashed on every sound load and
                                                       * track change); LINE: divided as the cards above */
@@ -2248,11 +2252,14 @@ static void draw_graph(void)
     if (!ui.force && sig == ui.graph_sig)
         return;
     ui.graph_sig = sig;
+    if (strip_kind() != SK_NONE)                    /* JSM MENU > LARGE: no graph for titles/lfo/adsr */
+        return;
+
     cv_begin(240, graph_h(), T_BG);
     cv_rrect(3, 0, 234, graph_h(), 5, T_SURF, T_BG);   /* the panel (MENU > LARGE: the strip) */
     cv_bg = T_SURF;                                  /* (text drawn with cv_text lands on it) */
     cv_oy = GOY;                                     /* graphs on a 100 px scale */
-    if (strip_kind() != SK_NONE) {                   /* MENU > LARGE: the strip */
+    /*if (strip_kind() != SK_NONE) {                  
         uint32_t k = strip_kind();
         cv_oy = k == SK_ADSR || k == SK_LFO ? 3 : 0;
         graph_ht = LG_H_GRAPH - 6;
@@ -2261,7 +2268,8 @@ static void draw_graph(void)
         else if (k == SK_LFO) graph_lfo(t, c);
         else graph_title();
         graph_ht = 100;
-    } else if (ui.home) {
+    } else */
+    if (ui.home) {
         cv_oy = 0;
         graph_scope(c);
     } else {

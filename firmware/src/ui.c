@@ -151,7 +151,8 @@ static uint8_t sync_reload;                  /* engine / preset / project / user
 #define H_FOOT 38
 /* MENU > LARGE (large_kind below): on the value pages the cards are tall (28..132) and the panel a strip
  * (136..198); elsewhere (lists, rolls, layers) the layout above, its card labels in M */
-#define LG_CARD_H 104
+/*#define LG_CARD_H 104*/
+#define LG_CARD_H 42
 #define LG_Y_GRAPH 136
 #define LG_H_GRAPH 62
 
@@ -389,7 +390,7 @@ static uint32_t large_kind(void)
     if (ui.layer)
         return LK_LABEL;
     if (ui.home)                                        /* (HOME > TRACKS: its rows need the panel, the cards as on */
-        return home_tracks() ? LK_LABEL : LK_TALL;      /* a list page; the rows' names in M: draw_home_tracks) */
+        return LK_OFF; //home_tracks() ? LK_LABEL : LK_TALL;      /* a list page; the rows' names in M: draw_home_tracks) */
     g = cur_page()->graph;
     return g == GR_BROWSE || g == GR_SLOTS || g == GR_USER || g == GR_PATS || g == GR_SONG || g == GR_ROLL ||
            g == GR_SLICES || g == GR_EVENTS ? LK_LABEL : LK_TALL;

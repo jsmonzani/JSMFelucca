@@ -552,6 +552,7 @@ static uint32_t span_face(uint32_t c, const card_span_t *sp, const char *label)
  * wide or the sparse L face lacks a glyph: gen_aa_font.py L_CHARS; #251: for any value the knob shows, sp: one face
  * for all of them, span_face); the unit (S) centred under it; the gauge. The value snaps (no rolling digits). MONO,
  * the knob just turned: the label inverted as on the small cards. */
+
 #ifndef LARGE_HOOK
 #define LARGE_HOOK(s, why) ((void)0)                    /* host: a tall card's value and its face (0 L, 1 M: a glyph not
                                                          * in L, 2 M: L too wide, 3 S) */
@@ -562,79 +563,98 @@ static uint32_t span_face(uint32_t c, const card_span_t *sp, const char *label)
 #define LG_VB 49                                        /* the value's band: L capitals rows 49..69 */
 #define LG_UY 73                                        /* the unit's line (S capitals rows 76..84) */
 #define LG_GY 92                                        /* the gauge, 3 px */
+
+#define ROW_W      240                                  /* the screen's full width */
+#define ROW_LAB_W  (ROW_W * 50 / 100)                   /* the label's cell: 120 */
+#define ROW_VAL_W  (ROW_W * 40 / 100)                   /* the value's cell: 96 */
+#define ROW_UNI_W  (ROW_W - ROW_LAB_W - ROW_VAL_W)      /* the unit's cell: 24 */
+#define ROW_VAL_X  ROW_LAB_W
+#define ROW_UNI_X  (ROW_LAB_W + ROW_VAL_W)
+#define ROW_GH     3                                    /* the gauge's height */
+#define ROW_GY     (LG_CARD_H - ROW_GH - 1)             /* the gauge's top: rows 38..40 of 42 */
+#define ROW_BODY_H (ROW_GY - 1)                         /* rows 0..36: the text is centred in them */
+#define ROW_PAD    5                                    /* the margin kept at each side of a cell (as the gauge's) */
+#ifndef ROW_Y
+#define ROW_Y(c)   ((uint32_t)(Y_LABEL + (int32_t)(c) * LG_CARD_H))   /* line c's top on the screen: adapt */
+#endif
+
+#define ROW_LEFT   0                                    /* the text's ink starts at the cell's left margin */
+#define ROW_RIGHT  1                                    /* the text's ink ends at the cell's right margin */
+
+/* the L capitals and the keycap must fit above the gauge (compile-time check) */
+typedef char row_chk_cap[(AF_L_CAP_H <= ROW_BODY_H) ? 1 : -1];
+typedef char row_chk_key[(KC_H <= ROW_BODY_H) ? 1 : -1];
+
+/* s in face L inside the cell x0 .. x0 + w: its ink against the left or the right margin (al), centred up and down
+ * by the capitals. Wider than the cell less its margins: ellipsised, filling the cell (never a smaller face) */
+static void row_text_l(int32_t x0, int32_t w, const char *s, uint16_t fg, uint16_t bg, int al)
+{
+    int32_t y = CAP_IN(L, ROW_BODY_H), b[4], maxw = w - 2 * ROW_PAD;
+    text_ink(&AF_L, s, b);
+    if (b[2] - b[0] > maxw) {
+        GFX_HOOK_ALIGN(x0, 0, x0 + w, ROW_BODY_H, AL_V, "row text (cut)");
+        cv_text_fit(x0 + ROW_PAD, y, &AF_L, s, fg, bg, maxw);
+    } else if (al == ROW_RIGHT) {
+        GFX_HOOK_ALIGN(x0, 0, x0 + w - ROW_PAD, ROW_BODY_H, AL_V | AL_R, "row text right");
+        cv_text_on(x0 + w - ROW_PAD - b[2], y, &AF_L, s, fg, bg);
+    } else {
+        GFX_HOOK_ALIGN(x0, 0, x0 + w, ROW_BODY_H, AL_V, "row text left");
+        cv_text_on(x0 + ROW_PAD - b[0], y, &AF_L, s, fg, bg);
+    }
+}
+
 static void draw_column_tall(uint32_t c, const char *label, const char *val, const char *unit, uint16_t vc, int32_t ratio,
                              uint32_t icon, int hot, int mot, int32_t kid, const card_span_t *sp)
 {
     uint16_t lc = hot ? T_ACCENT : mot ? T_THEME : T_MID;
-    const aafont_t *lf = &AF_M, *vf = &AF_L;
-    int32_t ly = LG_LY, vy, lw = 0, mw;
-    char k[3] = {'K', (char)('1' + c), 0};
-    uint32_t ic = mot ? ICON_X_MOTION : icon, isz = 16u;
-    cv_begin(COL_W, LG_CARD_H, T_BG);
-    cv_rrect(0, 0, COL_W, LG_CARD_H, 4, T_SURF, T_BG);
-    {   /* the knob: "K1" .. "K4" on a pill */
-        uint16_t fill = hot ? T_ACCENT : label[0] || val[0] ? T_KEY : T_DIM;
-        mw = ink_w(&AF_M, k) + 10;
-        cv_rrect(5, LG_MY, mw, LG_MH, 5, fill, T_SURF);
-        GFX_HOOK_ALIGN(5, LG_MY, 5 + mw, LG_MY + LG_MH, AL_HV, "large card knob pill");
-        cv_text_in(5, LG_MY + CAP_IN(M, LG_MH), mw, &AF_M, k, T_INK, fill);
-    }
-    if (!label[0] && !val[0]) {                         /* a knob that does nothing on this page */
-        cv_blit((uint32_t)CARD_X(c), Y_LABEL);
-        return;
-    }
-    if (FELUCCA_ICONS && ic != ICON_NONE && label[0] && (ic - ICON_TRK < NTRK || icon_cell(&isz, ic) >= 0)) {
-        GFX_HOOK_ALIGN(0, LG_MY, 0, LG_MY + LG_MH, AL_V, "large card icon on its pill's line");
-        cv_icon_in(COL_W - 5 - 16, LG_MY, 16, LG_MH, 16, ic, mot ? (hot ? T_ACCENT : T_THEME) : lc, T_SURF);
-    }
+    (void)icon;                                         /* (the icon was already disabled) */
+    (void)sp;                                           /* (no span face: the value always stays in L) */
+    cv_begin(ROW_W, LG_CARD_H, T_BG);
+
+    /* 1. the label, in L, left-aligned in its cell (50 %) */
     if (label[0]) {
-        if ((lw = ink_w(lf, label)) > COL_W - 6) {      /* M too wide: S, on the same capitals' middle */
-            lf = &AF_S;
-            ly = LG_LY + AF_M_CAP_Y + HALF_UP(AF_M_CAP_H - AF_S_CAP_H) - AF_S_CAP_Y;
-            lw = ink_w(lf, label);
-        }
         if (hot && T_ACCENT == T_MID) {                 /* MONO: the label inverted, the chip 2 px round its ink */
-            int32_t cy = ly + (lf == &AF_M ? AF_M_CAP_Y : AF_S_CAP_Y), chh = lf == &AF_M ? AF_M_CAP_H : AF_S_CAP_H;
-            int32_t x0 = HALF_UP(COL_W - lw) - 2;
-            cv_rrect(x0, cy - 3, lw + 4, chh + 6, 3, T_ACCENT, T_SURF);
-            GFX_HOOK_ALIGN(x0, cy - 3, x0 + lw + 4, cy + chh + 3, AL_HV, "large card label chip (MONO hot)");
-            cv_text_in(0, ly, COL_W, lf, label, T_INK, T_ACCENT);
+            int32_t lw = ink_w(&AF_L, label), cy = CAP_IN(L, ROW_BODY_H) + AF_L_CAP_Y, chh = AF_L_CAP_H;
+            int32_t cw = lw > ROW_LAB_W - 2 * ROW_PAD ? ROW_LAB_W - 2 * ROW_PAD : lw;
+            int32_t x0 = ROW_PAD - 2, y0 = cy - 2 < 0 ? 0 : cy - 2;
+            cv_rrect(x0, y0, cw + 4, chh + 4, 3, T_ACCENT, T_SURF);
+            GFX_HOOK_ALIGN(x0, y0, x0 + cw + 4, y0 + chh + 4, AL_HV, "row label chip (MONO hot)");
+            row_text_l(0, ROW_LAB_W, label, T_INK, T_ACCENT, ROW_LEFT);
         } else {
-            GFX_HOOK_ALIGN(0, 0, COL_W, 0, AL_H, "large card label centred");
-            cv_text_in(0, ly, COL_W, lf, label, lc, T_SURF);
+            row_text_l(0, ROW_LAB_W, label, lc, T_SURF, ROW_LEFT);
         }
     }
-    if (kid >= 0) {                                     /* "[OCT+]": the keycap, centred */
-        GFX_HOOK_ALIGN(0, LG_VB, COL_W, LG_VB + AF_L_CAP_H, AL_HV, "large card keycap centred");
-        cv_keycap(HALF_UP(COL_W - kc_w((uint32_t)kid)), LG_VB + HALF_UP(AF_L_CAP_H - KC_H), (uint32_t)kid,
+
+    /* 2. the value (or the keycap), in L, right-aligned in its cell (40 %) */
+    if (kid >= 0) {                                     /* "[OCT+]": the keycap, against the right margin */
+        int32_t kx = ROW_VAL_X + ROW_VAL_W - ROW_PAD - (int32_t)kc_w((uint32_t)kid);
+        GFX_HOOK_ALIGN(ROW_VAL_X, 0, ROW_VAL_X + ROW_VAL_W - ROW_PAD, ROW_BODY_H, AL_V | AL_R, "row keycap right");
+        cv_keycap(kx, HALF_UP(ROW_BODY_H - KC_H), (uint32_t)kid,
                   vc == T_ACCENT || vc == T_DIM ? vc : T_KEY, T_INK, T_SURF);
     } else if (val[0]) {
-        uint32_t f = tall_face(val), fs = sp->fn ? span_face(c, sp, label) : 0u;
-        int why;
-        if (fs > f)
-            f = fs;                                     /* (the value's own where it needs a smaller one) */
-        vf = f == 0u ? &AF_L : f == 1u ? &AF_M : &AF_S;
-        why = f == 2u ? 3 : f == 1u ? (!large_face_has(val) ? 1 : 2) : 0;
-        LARGE_HOOK(val, why);
-        vy = vf == &AF_L ? LG_VB - AF_L_CAP_Y : vf == &AF_M ? LG_VB + HALF_UP(AF_L_CAP_H - AF_M_CAP_H) - AF_M_CAP_Y
-                                                          : LG_VB + HALF_UP(AF_L_CAP_H - AF_S_CAP_H) - AF_S_CAP_Y;
-        if (vf == &AF_S && ink_w(vf, val) > COL_W - 4) {   /* (a value always fits: the lint reports one cut) */
-            cv_text_fit(2, vy, vf, val, vc, T_SURF, COL_W - 4);
+        LARGE_HOOK(val, large_face_has(val) ? 0 : 1);   /* (1: a glyph not in L: add it to L_CHARS) */
+        row_text_l(ROW_VAL_X, ROW_VAL_W, val, vc, T_SURF, ROW_RIGHT);
+    }
+
+    /* 3. the unit (S), centred in its cell (10 %) */
+    if (unit[0]) {
+        int32_t uy = CAP_IN(S, ROW_BODY_H);
+        if (ink_w(&AF_S, unit) > ROW_UNI_W) {           /* (24 px: a long unit is ellipsised) */
+            cv_text_fit(ROW_UNI_X, uy, &AF_S, unit, T_MID, T_SURF, ROW_UNI_W);
         } else {
-            GFX_HOOK_ALIGN(0, LG_VB, COL_W, LG_VB + AF_L_CAP_H, AL_HV, "large card value centred");
-            cv_text_in(0, vy, COL_W, vf, val, vc, T_SURF);
+            GFX_HOOK_ALIGN(ROW_UNI_X, 0, ROW_UNI_X + ROW_UNI_W, ROW_BODY_H, AL_HV, "row unit centred");
+            cv_text_in(ROW_UNI_X, uy, ROW_UNI_W, &AF_S, unit, T_MID, T_SURF);
         }
     }
-    if (unit[0]) {
-        GFX_HOOK_ALIGN(0, 0, COL_W, 0, AL_H, "large card unit centred");
-        cv_text_in(0, LG_UY, COL_W, &AF_S, unit, T_MID, T_SURF);
-    }
+
+    /* the gauge, along the bottom of the line, over its full width */
     if (ratio >= 0) {
-        int32_t gw = COL_W - 10, fx = ratio * gw / 1000;
-        cv_rrect(5, LG_GY, gw, 3, 1, ux.style ? T_LINE : T_BG, T_SURF);
-        cv_rrect(5, LG_GY, fx < 3 ? 3 : fx, 3, 1, hot ? T_ACCENT : vc == T_DIM ? T_DIM : T_THEME, T_BG);
+        int32_t gw = ROW_W - 2 * ROW_PAD, fx = ratio * gw / 1000;
+        cv_rrect(ROW_PAD, ROW_GY, gw, ROW_GH, 1, T_BG, T_SURF);   /* (ux.style / T_LINE ignored) */
+        cv_rrect(ROW_PAD, ROW_GY, fx < ROW_GH ? ROW_GH : fx, ROW_GH, 1,
+                 hot ? T_ACCENT : vc == T_DIM ? T_DIM : T_THEME, T_BG);
     }
-    cv_blit((uint32_t)CARD_X(c), Y_LABEL);
+    cv_blit(0, ROW_Y(c));
 }
 
 /* one card = one knob: [icon] LABEL / value unit / gauge on a SURF card, redrawn only when it changed.
