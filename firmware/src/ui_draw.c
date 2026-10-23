@@ -1559,6 +1559,102 @@ static void draw_confirm(void)
     cv_blit(DLG_X, DLG_Y);
 }
 
+/* JSM Big message for ui.msg */
+
+/* MSG BIG: ui.msg in face L, in a card in the middle of the screen (a modal dialog), word-wrapped */
+#define BM_H     120                                    /* the card's height: fixed, the lower half of the screen */
+#define BM_Y     (240 - BM_H)                           /* its top: it covers the footer too */
+#define BM_W     240                                    /* the card's width */
+#define BM_PAD   12                                     /* margin round the text */
+#define BM_GAP   8                                      /* between two lines' capitals */
+#define BM_PITCH (AF_L_CAP_H + BM_GAP)                  /* one line's step */
+#define BM_TEXTW (BM_W - 2 * BM_PAD)
+//#define BM_MAXL  ((int32_t)(CV_MAX / BM_W) - 2 * BM_PAD + BM_GAP) / BM_PITCH   /* what the canvas can hold */
+#define BM_MAXL  ((BM_H - 2 * BM_PAD + BM_GAP) / BM_PITCH)   /* the lines it holds: 2 with L at 36 px, 3 at 28 */
+#define BM_LEN   48                                     /* a line's buffer (text_fit's own is 48) */
+#define BM_LINES 6                                      /* at most this many lines, whatever the canvas */
+
+/* s wrapped to maxw px in face f: at the last blank that fits, else (a word wider than the line) at the character.
+ * Returns the number of lines (<= maxl); if text is left over, the last line is the rest, ellipsised. */
+static uint32_t bm_wrap(const char *s, const aafont_t *f, int32_t maxw, uint32_t maxl, char ln[][BM_LEN])
+{
+    uint32_t n = 0;
+    while (*s == ' ')
+        s++;
+    while (*s && n < maxl) {
+        char *d = ln[n];
+        uint32_t k = 0, sp = 0;                         /* k: chars taken; sp: the last blank's index + 1 (0: none) */
+        const char *p = s;
+        while (*p && k + 1u < BM_LEN) {
+            d[k] = *p;
+            d[k + 1u] = 0;
+            if (k && text_w(f, d) > maxw)
+                break;                                  /* d[0..k] is too wide: the line ends before d[k] */
+            if (*p == ' ')
+                sp = k + 1u;
+            k++;
+            p++;
+        }
+        if (*p && *p != ' ' && sp)                      /* mid-word: back to the last blank */
+            k = sp, p = s + sp;
+        while (k && d[k - 1u] == ' ')                   /* (no trailing blanks, no leading ones on the next) */
+            k--;
+        d[k] = 0;
+        s = p;
+        while (*s == ' ')
+            s++;
+        n++;
+    }
+    if (*s && n) {                                      /* text left: the last line takes the rest, ellipsised */
+        const char *r = s;
+        char t[BM_LEN];
+        uint32_t k = 0, j = 0;
+        while (ln[n - 1u][j] && k + 1u < BM_LEN)        /* (the last line as it was ..) */
+            t[k++] = ln[n - 1u][j++];
+        t[k++] = ' ';
+        while (*r && k + 1u < BM_LEN)                   /* .. and what follows it */
+            t[k++] = *r++;
+        t[k] = 0;
+        text_fit(ln[n - 1u], BM_LEN, t, f, maxw);
+    }
+    return n;
+}
+
+static void draw_msg_big(void)
+{
+    char ln[BM_LINES][BM_LEN];
+    uint32_t n, i, maxl = (uint32_t)(BM_MAXL);
+    int32_t top;
+    if (!ui.msg_t)
+        return;
+    if (maxl > BM_LINES)
+        maxl = BM_LINES;
+    n = bm_wrap(ui.msg, &AF_L, BM_TEXTW, maxl, ln);
+    if (!n)
+        return;
+    top = HALF_UP(BM_H - ((int32_t)n * BM_PITCH - BM_GAP));   /* the lines' capitals as a block, centred in the card */
+    cv_begin(BM_W, BM_H, T_MID);
+    cv_rect(0, 0, BM_W, BM_H, T_MID);
+    for (i = 0; i < n; i++) {
+        int32_t ly = top + (int32_t)i * BM_PITCH - AF_L_CAP_Y;   /* the capitals' top at top + i * BM_PITCH */
+        GFX_HOOK_ALIGN(0, 0, BM_W, 0, AL_H, "big message line centred");
+        cv_text_in(0, ly, BM_W, &AF_L, ln[i], T_BG, T_MID);
+    }
+    cv_blit(0, BM_Y);
+}
+/* 1 on the frame after the big message ended or changed (a smaller card would leave its edge): ui.force then repaints the
+ * page under it. Called once a frame, before the drawing (ui_draw_page) */
+static int msg_big_changed(void)
+{
+    static uint32_t last;
+    uint32_t now = ui.msg_t ? str_hash(13u, ui.msg) | 1u : 0u;   /* (| 1: never 0 while it shows) */
+    int ch = last && now != last;
+    last = now;
+    return ch;
+}
+
+/* JSM end */
+
 /* the stored STYLE (ui_style: the menu, a settings import, a restore) into gfx.c's copy: the tokens again, all redrawn */
 static void style_apply(void)
 {
@@ -1638,6 +1734,8 @@ static void ui_draw_page(uint32_t counting)
         page_entered();
     }
     cursor_fix();
+    if (msg_big_changed())
+        ui.force = 1;
     if (ui.force)
         draw_frame();
     felucca_dbg.stage = 3;
@@ -1646,11 +1744,14 @@ static void ui_draw_page(uint32_t counting)
     draw_columns();
     felucca_dbg.stage = 5;
     draw_graph();
+
     if (ui.msg_t && !--ui.msg_t && ui.msg2[0]) {     /* the second message (ui_notices) */
         str_cpy(ui.msg, ui.msg2, sizeof ui.msg);
         ui.msg2[0] = 0;
         ui.msg_t = 60;
+            
     }
+
     if (ui.bpm_t)
         ui.bpm_t--;
     if (ui.hot_t)
@@ -1659,5 +1760,7 @@ static void ui_draw_page(uint32_t counting)
         ui.help_t--;
     felucca_dbg.stage = 6;
     draw_foot();
+    draw_msg_big();
+
     ui.force = 0;
 }

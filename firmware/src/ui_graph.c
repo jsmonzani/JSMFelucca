@@ -198,6 +198,7 @@ static void graph_roll(const track_t *t, uint16_t c)
     uint64_t locks = motion_lock_steps(trk_index(t));
     int32_t r, ybot = PR_Y0 + PR_ROWS * PR_RH, gw;
     char nb[8];
+
     ncol = base < len ? (len - base < 16u ? len - base : 16u) : 0u;
     gw = (int32_t)ncol * PR_CW + 1;
     for (r = 0; r < PR_ROWS; r++) {                 /* rows: the lane, the key, the C names */

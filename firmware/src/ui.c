@@ -539,6 +539,11 @@ static void page_entered(void)
     ui.act = pg->graph == GR_USER ? 4u : 0u;     /* the save screen is ready for OCT+ */
     ui.tl_clean = 0;
     help_start();
+
+    /* JSM show the page names in big*/
+    if (!ui.home && (pg->fam == FAM_FX || pg->fam == FAM_SCL || pg->fam == FAM_ENV || pg->fam == FAM_LFO ||
+                     pg->fam == FAM_ARP || pg->fam == FAM_EDIT))
+        ui_say("", pg->title);                   /* the page's name, for a moment (as the footer's, in the top bar) */    
     ui.force = 1;
 }
 
