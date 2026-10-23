@@ -16,6 +16,7 @@
  *         DEPTH; bipolar, 0 until the LFO's first cycle ends. It follows RATE and SYNC (a step per note value)
  *   SLEW  (#132) S&H slewed: it glides linearly from the cycle before's value to this cycle's over the cycle
  *         (a smooth random line, one cycle behind S&H, continuous where S&H steps); bipolar
+ *   NOIZ  JSM simple random noise
  *   Both are per track (one value for every voice) and cost no state but the one value kept per cycle.
  * Destinations:
  *   per voice (vmod_t, like the fixed routings):
@@ -50,7 +51,7 @@
  * presets read and write t->p from the main loop, which the ISR preempts; TIMER5 only fills the MIDI rings),
  * and the engines read t->p as before. An engine reads its parameters in note_on (events_block) unmodulated.
  * Nothing active (every slot with SRC, DST or AMT at 0): no work, and the sound is bit-identical. */
-enum { MS_OFF, MS_LFO, MS_ENV, MS_VEL, MS_KEY, MS_RAND, MS_MODW, MS_AT, MS_EXPR, MS_SH, MS_SLEW, MS_N };
+enum { MS_OFF, MS_LFO, MS_ENV, MS_VEL, MS_KEY, MS_RAND, MS_MODW, MS_AT, MS_EXPR, MS_SH, MS_SLEW, MS_NOIZ, MS_N };
 enum { MD_OFF, MD_PITCH, MD_CUT, MD_SHP, MD_AMP, MD_PAN, MD_DIST, MD_CHO, MD_DLY, MD_REV, MD_RATE, MD_VIB, MD_E1,
        MD_DEPTH = MD_E1 + 8, MD_VEL, MD_TIME, MD_N };   /* (append-only: the stored values keep their meaning) */
 _Static_assert(NELEM(N_MSRC) == MS_N && NELEM(N_MDST) == MD_N, "N_MSRC / N_MDST == MS_* / MD_*");
@@ -97,6 +98,15 @@ static int16_t mod_rand(void)    /* RAND of a note-on: xorshift32, bipolar */
     return (int16_t)(mod_seed >> 16);
 }
 
+static uint32_t noiz_seed = 0x2545F491u;
+static int16_t mod_noiz(void)    /* RAND of a note-on: xorshift32, bipolar */
+{
+    noiz_seed ^= noiz_seed << 13;
+    noiz_seed ^= noiz_seed >> 17;
+    noiz_seed ^= noiz_seed << 5;
+    return (int16_t)(noiz_seed >> 16);
+}
+
 static int32_t mod_key(uint32_t note) { return clamp(((int32_t)note - 60) * 512, -32767, 32767); }
 
 /* S&H: the value of the LFO's cycle (voice.c lfo_rand; 0 before its first one ends), bipolar */
@@ -124,6 +134,8 @@ static int32_t mod_tsrc(const track_t *t, uint32_t s, int32_t lfo)
         return t->mw * 258;
     case MS_AT:
         return t->at * 258;
+    case MS_NOIZ:
+        return mod_noiz();
     default:
         return (127 - t->ex_off) * 258;
     }
