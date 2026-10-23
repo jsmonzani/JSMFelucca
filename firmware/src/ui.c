@@ -152,7 +152,7 @@ static uint8_t sync_reload;                  /* engine / preset / project / user
 /* MENU > LARGE (large_kind below): on the value pages the cards are tall (28..132) and the panel a strip
  * (136..198); elsewhere (lists, rolls, layers) the layout above, its card labels in M */
 /*#define LG_CARD_H 104*/
-#define LG_CARD_H 42
+#define LG_CARD_H 43
 #define LG_Y_GRAPH 136
 #define LG_H_GRAPH 62
 
