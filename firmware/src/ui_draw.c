@@ -1569,7 +1569,6 @@ static void draw_confirm(void)
 #define BM_GAP   8                                      /* between two lines' capitals */
 #define BM_PITCH (AF_L_CAP_H + BM_GAP)                  /* one line's step */
 #define BM_TEXTW (BM_W - 2 * BM_PAD)
-//#define BM_MAXL  ((int32_t)(CV_MAX / BM_W) - 2 * BM_PAD + BM_GAP) / BM_PITCH   /* what the canvas can hold */
 #define BM_MAXL  ((BM_H - 2 * BM_PAD + BM_GAP) / BM_PITCH)   /* the lines it holds: 2 with L at 36 px, 3 at 28 */
 #define BM_LEN   48                                     /* a line's buffer (text_fit's own is 48) */
 #define BM_LINES 6                                      /* at most this many lines, whatever the canvas */

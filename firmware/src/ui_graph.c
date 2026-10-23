@@ -192,6 +192,54 @@ static void pr_bars(const step_t *st, int32_t x, int32_t w, uint16_t c, int acc_
             pr_split(x, y + 1, w, PR_RH - 2, c, hits);
     }
 }
+
+/* (Skiff) SEQ > STEP as the B mockup draws it: the 16 steps of the cursor's bar as tiles, two rows of eight (the
+ * keyboard's two halves), each over its number. A note: a tile of the track's colour, its name in INK low in it (a chord:
+ * its lowest, "+"); a TIE: the tile half way to the empty one's; empty or a REST: SURF (FLAT, LINE: RAISE); the step
+ * edited: white. A chance under 100 % or a condition: a 4 px INK block in its corner (the mockup's), a lock: one at its
+ * top right. The number under it: MID, the step playing's in REC's colour. BLOCKS: on the black ground, as the mockup;
+ * the block centred up and down in the panel. A drum track: the grid (graph_grid), as on ROLL */
+#define TL_W 27                                       /* a tile 27 x 33, 29 apart from x 4: 4 .. 233 */
+#define TL_H 33
+#define TL_P 58                                       /* the rows 58 apart: a tile, its number, the gap */
+#define TL_NY 15                                      /* a note's name: its capitals rows 18 .. 27 of the tile */
+static void graph_tiles(const track_t *t, uint16_t c)
+{
+    uint32_t i, k, len = (uint32_t)t->p[P_SLEN], base = ui.bank * 16u;
+    uint64_t locks = motion_lock_steps(trk_index(t));
+    int32_t top = ((int32_t)cv_h - (TL_P + TL_H + 3 + AF_S_CAP_H)) / 2;
+    uint16_t empty = T_SURF, g = T_BG;
+    cv_rect(0, 0, 240, (int32_t)cv_h, T_BG);
+    cv_bg = T_BG;
+    for (i = 0; i < 16u && base + i < len; i++) {
+        uint32_t si = base + i, lo;
+        const step_t *st = &t->step[si];
+        int32_t x = 4 + 29 * (int32_t)(i % 8u), y = top + TL_P * (int32_t)(i / 8u);
+        int on = step_on(st) && st->n, tie = st->time == ST_TIE;
+        uint16_t fill = si == ui.cursor ? T_TEXT : on ? c : tie ? ux_mix(c, empty, 50) : empty;
+        char nb[8];
+        cv_rrect(x, y, TL_W, TL_H, 3, fill, g);
+        if (on) {
+            for (lo = st->note[0], k = 1; k < st->n; k++)
+                if (st->note[k] < lo)
+                    lo = st->note[k];
+            note_name(nb, lo);
+            if (st->n > 1u)
+                str_cpy(nb + str_len(nb), "+", 2);
+            GFX_HOOK_ALIGN(x, 0, x + TL_W, 0, AL_H, "step tile note centred");
+            cv_text_in(x, y + TL_NY, TL_W, &AF_S, nb, T_INK, fill);
+            /*if (step_chance(st) < 100u || st->cond)
+                cv_rect(x + 2, y + 2, 4, 4, T_INK);*/
+        }
+        if ((locks >> si) & 1u)
+            cv_rect(x + TL_W - 6, y + 2, 4, 4, on || si == ui.cursor ? T_INK : T_MID);
+        fmt_int(nb, (int32_t)si + 1);
+        GFX_HOOK_ALIGN(x, 0, x + TL_W, 0, AL_H, "step tile number centred");
+        cv_text_in(x, y + TL_H + 3 - AF_S_CAP_Y, TL_W, &AF_S, nb, song.playing && si == t->seq_idx ? T_REC : T_MID, g);
+    }
+}
+
+// JSM piano roll
 static void graph_roll(const track_t *t, uint16_t c)
 {
     uint32_t i, len = (uint32_t)t->p[P_SLEN], base = ui.bank * 16u, ncol, mask = scale_mask(t), held = pr_held();
@@ -2288,7 +2336,7 @@ static void draw_graph(void)
             else if (drum_track(t))
                 graph_grid(t, c);
             else
-                graph_roll(t, c);
+                graph_tiles(t,c); //roll(t, c);
             break;
         case GR_SCALE:
             graph_scale(t, c);

@@ -2151,7 +2151,8 @@ static void align_sweeps(void)
         for (v = 0; v + PR_ROWS <= 128; v++) {
             proll.lo = (uint8_t)v;
             cv_begin(240, H_GRAPH, T_SURF);
-            graph_roll(TSEL, T_THEME);
+            //graph_roll(TSEL, T_THEME);
+            graph_tiles(TSEL, T_THEME);
         }
         state(); pal(UI_GREY_INDEX);
         cur_name = st ? "sweep LINE: drum kits" : "sweep FLAT: drum kits";
