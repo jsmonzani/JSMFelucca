@@ -68,9 +68,9 @@ TR = 22050                                   # stored sample rate
 # that the envelope fades, "kit" one sample per key)
 # Built-in sets (piano, flute); the other slots of the 8 are for the user (USR1-3, loaded
 # from the web editor). TRANH was removed (66 KB of flash); its index 1 stays, an alias of PIANO
-# ("alias": the set named). SAX was replaced by TARDI. PERC (the GM kit) was removed (66 KB); its index 4 stays, an alias of
+# ("alias": the set named). SAX was replaced by RECORDER. PERC (the GM kit) was removed (66 KB); its index 4 stays, an alias of
 # PIANO too (PERC_SLOT; its sounds load as the DRUM engine)
-CC0_SETS = [("PIANO", "piano"), ("PIANO", "alias"), ("FLUTE", "sus"), ("TARDI", "sus"), ("PIANO", "alias")]
+CC0_SETS = [("PIANO", "piano"), ("PIANO", "alias"), ("FLUTE", "sus"), ("RECORDER", "sus"), ("PIANO", "alias")]
 PERC_SLOT = 4                                # core.h SMP_SET_PERC: SAMPLE's factory presets end before it
 MEASURED_TUNING = ()                         # sets whose recordings are not at A440 (was TRANH, ~+35 ct)
 

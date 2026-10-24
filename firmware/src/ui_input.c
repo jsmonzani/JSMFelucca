@@ -1345,7 +1345,7 @@ static int page_tap(uint32_t b)
             sd_reset();
         return 1;
     }
-    if (b == B_EDIT && song.seq_mode && !ui.home && cur_page()->graph == GR_ROLL) {   /* STEP: EDIT clears the step */
+    if (b == B_EDIT && song.seq_mode && !ui.home && (cur_page()->graph == GR_ROLL || cur_page()->graph == GR_1NOTE)) {   /* STEP: EDIT clears the step */
         uint64_t held = lock_held();
         if (chain_busy()) { ui_message("STOP TO EDIT"); return 1; }
         if (held) {                                     /* a step held: its locks (the step stays) */
