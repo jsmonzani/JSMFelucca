@@ -589,6 +589,160 @@ static uint32_t note_set_len(track_t *t, uint32_t i, uint32_t want)
     return n;
 }
 
+/* JSM sequence improvement */
+/* SMART CLEAR (EDIT on SEQ > STEP / 1NOTE). A step's notes can be chained in two ways:
+ *  - TIE steps after a NOTE step hold its notes (chain: the last NOTE step before them);
+ *  - polyphonic overdub (seq.c rec_note / chain_end): bit k of the flags, SF_CONT(k), says note[k] is HELD from the
+ *    step before (not retriggered) when that note sounds there.
+ * Clearing a step must not leave TIEs, held notes or CHANCEs hanging in the void after it (see step_clear_smart). */
+
+/* the notes of the step before idx that sound into it: the last non-TIE step before it (as seq.c chain_notes) */
+static uint32_t smart_prev_notes(const track_t *t, uint32_t idx, uint8_t *out)
+{
+    uint32_t len = (uint32_t)clamp(t->p[P_SLEN], 1, NSTEP), k, i;
+    for (k = 1; k < len; k++) {
+        const step_t *s = &t->step[(idx + len - k) % len];
+        if (s->time == ST_TIE)
+            continue;
+        if (s->time == ST_NOTE && s->n && s->n <= 4u) {
+            for (i = 0; i < s->n; i++)
+                out[i] = s->note[i];
+            return s->n;
+        }
+        return 0;
+    }
+    return 0;
+}
+
+/* bit k: note k of step idx is really held from the step before (its SF_CONT bit AND that note sounds there; bits 3..6
+ * of the flags are shared with RATCH / NUDGE in core.h, so the flag alone is not trusted) */
+static uint32_t smart_held(const track_t *t, uint32_t idx)
+{
+    const step_t *s = &t->step[idx];
+    uint8_t prev[4];
+    uint32_t np, k, j, m = 0;
+    if (s->time != ST_NOTE || !s->n || !(s->flags & SF_CONT_ALL))
+        return 0;
+    np = smart_prev_notes(t, idx, prev);
+    for (k = 0; k < s->n && k < 4u; k++) {
+        if (!(s->flags & SF_CONT(k)))
+            continue;
+        for (j = 0; j < np && prev[j] != s->note[k]; j++)
+            ;
+        if (j < np)
+            m |= 1u << k;
+    }
+    return m;
+}
+
+/* remove the notes whose bit is set in mask from the step's array: the others move up, with their SF_CONT bit */
+static void step_drop_notes(step_t *s, uint32_t mask)
+{
+    uint8_t nn[4] = {0, 0, 0, 0};
+    uint32_t k, j = 0, cont = 0;
+    for (k = 0; k < s->n && k < 4u; k++) {
+        if ((mask >> k) & 1u)
+            continue;
+        nn[j] = s->note[k];
+        if (s->flags & SF_CONT(k))
+            cont |= SF_CONT(j);
+        j++;
+    }
+    for (k = 0; k < 4u; k++)
+        s->note[k] = nn[k];
+    s->n = (uint8_t)j;
+    s->flags = (uint8_t)((s->flags & ~SF_CONT_ALL) | cont);
+}
+
+/* idx has lost the notes dead[0..nd): follow what depended on them over the steps after it (wrapping, as the
+ * sequencer): a TIE that ties nothing any more is cleared with its CHANCE; a step holding a dead note (SF_CONT) loses
+ * it, and is cleared too when nothing else is left in it; it stops at the first step that has its own notes
+ * with nothing dead left to hold, or at a REST. carried: idx still has notes that the TIEs after it hold */
+static void smart_follow(track_t *t, uint32_t idx, uint8_t *dead, uint32_t nd, uint32_t carried)
+{
+    uint32_t len = (uint32_t)clamp(t->p[P_SLEN], 1, NSTEP), k, i, j;
+    for (k = 1; k < len; k++) {
+        step_t *s = &t->step[(idx + k) % len];
+        uint8_t gone[4];
+        uint32_t drop = 0, ng = 0;
+        if (s->time == ST_TIE) {
+            if (carried) {                              /* a valid tie: it holds the notes that remain */
+                if (!nd)
+                    break;
+                continue;
+            }
+            step_clear(s);                              /* a tie to nothing (and its chance) */
+            continue;
+        }
+        if (s->time != ST_NOTE || (!s->n && !s->hit))   /* a REST: nothing goes on over it */
+            break;
+        for (i = 0; i < s->n && i < 4u; i++) {          /* notes held from the dead ones */
+            if (!(s->flags & SF_CONT(i)))
+                continue;
+            for (j = 0; j < nd && dead[j] != s->note[i]; j++)
+                ;
+            if (j < nd) {
+                drop |= 1u << i;
+                gone[ng++] = s->note[i];
+            }
+        }
+        if (drop)
+            step_drop_notes(s, drop);
+        for (i = 0; i < ng; i++)                        /* they stay dead for the steps after */
+            dead[i] = gone[i];
+        nd = ng;
+        if (!s->n && !s->hit) {                         /* nothing left but held notes: no step any more */
+            step_clear(s);
+            carried = 0;
+        } else {
+            carried = 1;
+        }
+        if (!nd && carried)
+            break;
+    }
+}
+
+/* EDIT on a melodic step. 1: the step has held notes (from the step before) and notes of its own: the oldest ones win,
+ * the held notes go on and only the step's own (newer) notes are removed ("EXTRA NOTES CLEARED"). C held, then E, then A
+ * added: on A's step, A goes and C and E go on. When the held notes are all the notes of the step before, the step
+ * becomes a TIE (nothing to put back in it); otherwise (a held subset: the others ended here, a TIE would hold them
+ * too) it keeps the held notes alone, still flagged held. 0: the step is cleared (as step_clear) and what depended on
+ * it with it (TIEs, held notes, chances: "NOTE(S) CLEARED"). A DRUM track clears the step as before */
+static uint32_t step_clear_smart(track_t *t, uint32_t idx)
+{
+    step_t *s = &t->step[idx];
+    uint8_t dead[4] = {0, 0, 0, 0};
+    uint32_t held, nd = 0, i;
+    if (drum_track(t)) {
+        step_clear(s);
+        return 0;
+    }
+    held = smart_held(t, idx);
+    if (s->n > 1u && held && held != (1u << s->n) - 1u) {
+        uint8_t prev[4];
+        uint32_t own = ~held & ((1u << s->n) - 1u), np = smart_prev_notes(t, idx, prev);
+        for (i = 0; i < s->n && i < 4u; i++)            /* the step's own notes end here (what held them goes too) */
+            if ((own >> i) & 1u)
+                dead[nd++] = s->note[i];
+        step_drop_notes(s, own);                        /* the held notes stay, as they were */
+        if (s->n == np) {                               /* all of the step before's: a plain TIE does the same */
+            step_clear(s);
+            s->time = ST_TIE;
+        }
+        smart_follow(t, idx, dead, nd, 1);
+        return 1;
+    }
+    if (s->time == ST_NOTE) {                           /* every note of the step ends here */
+        for (i = 0; i < s->n && i < 4u; i++)
+            dead[nd++] = s->note[i];
+    } else if (s->time == ST_TIE) {                     /* a TIE: the notes that were held over it */
+        nd = smart_prev_notes(t, idx, dead);
+    }
+    step_clear(s);
+    smart_follow(t, idx, dead, nd, 0);
+    return 0;
+}
+
 /* ------------------------------------------------------- the DRUM grid --- */
 /* SEQ > STEP on a DRUM track is the grid: 8 lanes x the 16 steps of a page. The white keys are the
  * steps of the page shown (a tap toggles the selected lane there), black keys 1..8 select the lane (and play

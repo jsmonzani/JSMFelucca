@@ -1,0 +1,34 @@
+--- a/ui.c
++++ b/ui.c
+@@ -703,7 +703,10 @@
+ }
+ 
+-/* EDIT on a melodic step. 1: the step had several notes and some were held from the step before: only those are
+- * removed (the step stays, with the others; "EXTRA NOTES CLEARED"). 0: the step is cleared (as step_clear) and what
+- * depended on it with it (TIEs, held notes, chances: "NOTE(S) CLEARED"). A DRUM track clears the step as before */
++/* EDIT on a melodic step. 1: the step has held notes (from the step before) and notes of its own: the oldest ones win,
++ * the held notes go on and only the step's own (newer) notes are removed ("EXTRA NOTES CLEARED"). C held, then E, then A
++ * added: on A's step, A goes and C and E go on. When the held notes are all the notes of the step before, the step
++ * becomes a TIE (nothing to put back in it); otherwise (a held subset: the others ended here, a TIE would hold them
++ * too) it keeps the held notes alone, still flagged held. 0: the step is cleared (as step_clear) and what depended on
++ * it with it (TIEs, held notes, chances: "NOTE(S) CLEARED"). A DRUM track clears the step as before */
+ static uint32_t step_clear_smart(track_t *t, uint32_t idx)
+ {
+@@ -717,8 +720,14 @@
+     held = smart_held(t, idx);
+     if (s->n > 1u && held && held != (1u << s->n) - 1u) {
+-        for (i = 0; i < s->n && i < 4u; i++)
+-            if ((held >> i) & 1u)
++        uint8_t prev[4];
++        uint32_t own = ~held & ((1u << s->n) - 1u), np = smart_prev_notes(t, idx, prev);
++        for (i = 0; i < s->n && i < 4u; i++)            /* the step's own notes end here (what held them goes too) */
++            if ((own >> i) & 1u)
+                 dead[nd++] = s->note[i];
+-        step_drop_notes(s, held);
++        step_drop_notes(s, own);                        /* the held notes stay, as they were */
++        if (s->n == np) {                               /* all of the step before's: a plain TIE does the same */
++            step_clear(s);
++            s->time = ST_TIE;
++        }
+         smart_follow(t, idx, dead, nd, 1);
+         return 1;

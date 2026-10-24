@@ -834,11 +834,26 @@ static void sound_name(const track_t *t, char *b)
         str_cpy(b, e->presets[t->preset % e->npresets].name, 16);
 }
 
+/* JSM sequence improvement */
+/* the 16-step bank the footer shows. The piano roll (GR_ROLL, melodic or DRUM grid) keeps ui.bank: ui.c follow_poll drives
+ * it there, with its hold while a step is edited, so footer and roll stay on the same page. On every other page, while
+ * the transport plays, the footer follows the playhead from page to page of 16 steps; stopped: ui.bank as before */
+static uint32_t foot_bank(const track_t *t)
+{
+    uint32_t len = (uint32_t)clamp(t->p[P_SLEN], 1, NSTEP), pg = t->seq_idx / 16u;
+    if (!song.playing || len <= 16u || pg >= (len + 15u) / 16u)
+        return ui.bank;
+    if (!ui.home && !ui.menu && !ui.confirm && cur_page()->graph == GR_ROLL)
+        return ui.bank;
+    return pg;
+}
+
 static void draw_foot(void)
 {
     char s[48], pn[16], ti[20], ln[24];
     const track_t *t = TSEL;
     uint32_t sig;
+    const uint32_t fb = foot_bank(t);                  /* JSM sequence improvement: the bank of the footer's 16 steps */
     const page_t *pg = cur_page();
     const engine_t *e = ENGINES[TSEL->eng_req % NENGINES];
     const char *ename = e->name, *help;
@@ -854,10 +869,10 @@ static void draw_foot(void)
     str_cpy(s + str_len(s), pn, 16);
     str_cpy(s + str_len(s), ti, sizeof ti);
     {   /* step markers: the playhead only when it is in the shown bank, the cursor only in SEQ */
-        uint32_t ph = song.playing && t->seq_idx / 16u == ui.bank ? t->seq_idx : 0xFFu;
+        uint32_t ph = song.playing && t->seq_idx / 16u == fb ? t->seq_idx : 0xFFu;   /* JSM sequence improvement: fb */
         sig = str_hash(0x9E3779B9u, s) + ph * 97u + (song.seq_mode ? ui.cursor : 0xFFu) * 3001u + steps_hash(t) +
               (ui.home ? 0u : page_icon(pg)) * 7121u +
-              ui.bank * 7u + (uint32_t)t->p[P_SLEN] * 13u;
+              fb * 7u + (uint32_t)t->p[P_SLEN] * 13u;   /* JSM sequence improvement: fb */
     }
     if (act_cols()) {                                  /* the hint, and whether OCT+ would act */
         char ha[16], hb[16];
@@ -913,10 +928,10 @@ static void draw_foot(void)
             cv_key_hint(232 - kh_w(KC_KEYS, "STEPS"), 2, KC_KEYS, "STEPS", 1, T_BG);   /* the keys are the steps */
     } else {
         uint32_t i;
-        if ((ui.bank + 1u) * 16u <= (uint32_t)t->p[P_SLEN])
+        if ((fb + 1u) * 16u <= (uint32_t)t->p[P_SLEN])   /* JSM sequence improvement: fb */
             GFX_HOOK_ALIGN(0, 0, 240, 0, AL_H | AL_CELLS | AL_N(16), "footer step bars centred");
         for (i = 0; i < 16u; i++) {                   /* row 1: the cursor's bank, 16 bars in 4 groups */
-            uint32_t si = ui.bank * 16u + i;
+            uint32_t si = fb * 16u + i;               /* JSM sequence improvement: fb */
             int32_t sx = bar_x(i);                    /* (centred: x 12 .. 228) */
             const step_t *st = &seq_steps(t)[si];
             if (si >= (uint32_t)t->p[P_SLEN])

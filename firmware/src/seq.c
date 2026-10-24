@@ -928,11 +928,36 @@ static void seq_start(void)
     perf_start();                                  /* perform.c: its 1/16 grid too */
 }
 
+/* JSM sequence improvement */
+/* MIDI OUT of the sequencer: the notes it plays go out on the track's channel (trk_midi_ch: ROUT's block, CH1-4 by
+ * default, or the track's own with TRACK), as the keys' do (key_on / key_off). A muted track sends no note-on; its
+ * note-offs always go out, so no note is left hanging. A DRUM lane's hit goes out as its GM note */
+static void seq_note_on(track_t *t, uint32_t note, uint32_t vel)
+{
+    trk_note_on(t, note, vel);
+    if (!t->p[P_MUTE])
+        midi_out_event(0x09u | (0x90u | trk_midi_ch(trk_index(t))) << 8 | (note & 0x7Fu) << 16 | (vel & 0x7Fu) << 24);
+}
+
+static void seq_note_off(track_t *t, uint32_t note)
+{
+    trk_note_off(t, note);
+    midi_out_event(0x08u | (0x80u | trk_midi_ch(trk_index(t))) << 8 | (note & 0x7Fu) << 16);
+}
+
+/* the notes the sequencer sounds on track t end on MIDI OUT only (panic, MIDI IN overflow: voice.c trk_all_off ends them) */
+static void seq_midi_flush(track_t *t)
+{
+    uint32_t i, n = t->seq_n > 4u + NLANE ? 4u + NLANE : t->seq_n;
+    for (i = 0; i < n; i++)
+        midi_out_event(0x08u | (0x80u | trk_midi_ch(trk_index(t))) << 8 | ((uint32_t)t->seq_notes[i] & 0x7Fu) << 16);
+}
+
 static void seq_release(track_t *t)
 {
     uint32_t i;
     for (i = 0; i < t->seq_n; i++)
-        trk_note_off(t, t->seq_notes[i]);
+        seq_note_off(t, t->seq_notes[i]);   /* JSM sequence improvement: MIDI OUT too */
     t->seq_n = 0;
     t->seq_hold = 0;
     t->slide_glide = 0;                             /* live MONO / LEG keys must not glide after it */
@@ -1058,7 +1083,7 @@ static __attribute__((noinline)) void seq_step(track_t *t, const step_t *s, uint
             if (i < s->n) {
                 kept |= 1u << i; /* La note continue */
             } else {
-                trk_note_off(t, old[j]); /* La note s'arrête */
+                seq_note_off(t, old[j]); /* La note s'arrête */   /* JSM sequence improvement: MIDI OUT */
             }
         }
 
@@ -1067,7 +1092,7 @@ static __attribute__((noinline)) void seq_step(track_t *t, const step_t *s, uint
         /* Déclencher uniquement les notes du pas qui ne sont PAS marquées comme "continuant" */
         for (i = 0; i < s->n; i++) {
             if (!((kept >> i) & 1u) && !((skip >> i) & 1u)) {
-                trk_note_on(t, s->note[i], vel);
+                seq_note_on(t, s->note[i], vel);   /* JSM sequence improvement: MIDI OUT */
             }
         }
 
@@ -1123,7 +1148,7 @@ static __attribute__((noinline)) void seq_step(track_t *t, const step_t *s, uint
 
     for (i = 0; i < m; i++) {
         if (!((sk >> i) & 1u))
-            trk_note_on(t, nn[i], vv[i]);
+            seq_note_on(t, nn[i], vv[i]);   /* JSM sequence improvement: MIDI OUT */
     }
 
     if (slide_in) {
@@ -1131,7 +1156,7 @@ static __attribute__((noinline)) void seq_step(track_t *t, const step_t *s, uint
             for (j = 0; j < m && nn[j] != t->seq_notes[i]; j++)
                 ;
             if (j == m)
-                trk_note_off(t, t->seq_notes[i]);
+                seq_note_off(t, t->seq_notes[i]);   /* JSM sequence improvement: MIDI OUT */
         }
     }
 
@@ -1490,6 +1515,7 @@ static void events_block(uint32_t n)
         memset(mchord, 0, sizeof mchord);
         midi_hint = 0;
         for (i = 0; i < NTRK; i++) {
+            seq_midi_flush(&trk[i]);                   /* JSM sequence improvement: MIDI OUT */
             trk[i].rh_n = trk[i].rskip_n = 0;
             trk[i].seq_n = trk[i].seq_hold = trk[i].slide_glide = trk[i].rat_left = 0;
         }
@@ -1501,6 +1527,7 @@ static void events_block(uint32_t n)
         track_t *t = &trk[i];
         if ((pr >> i) & 1u) {
             midi_forget_track(i);
+            seq_midi_flush(t);                        /* JSM sequence improvement: MIDI OUT */
             trk_all_off(t);
             t->nheld = 0;
             t->arp_phys = 0;

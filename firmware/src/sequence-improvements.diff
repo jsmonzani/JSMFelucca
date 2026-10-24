@@ -1,0 +1,360 @@
+--- a/seq.c
++++ b/seq.c
+@@ -928,11 +928,36 @@
+     perf_start();                                  /* perform.c: its 1/16 grid too */
+ }
+ 
++/* JSM sequence improvement */
++/* MIDI OUT of the sequencer: the notes it plays go out on the track's channel (trk_midi_ch: ROUT's block, CH1-4 by
++ * default, or the track's own with TRACK), as the keys' do (key_on / key_off). A muted track sends no note-on; its
++ * note-offs always go out, so no note is left hanging. A DRUM lane's hit goes out as its GM note */
++static void seq_note_on(track_t *t, uint32_t note, uint32_t vel)
++{
++    trk_note_on(t, note, vel);
++    if (!t->p[P_MUTE])
++        midi_out_event(0x09u | (0x90u | trk_midi_ch(trk_index(t))) << 8 | (note & 0x7Fu) << 16 | (vel & 0x7Fu) << 24);
++}
++
++static void seq_note_off(track_t *t, uint32_t note)
++{
++    trk_note_off(t, note);
++    midi_out_event(0x08u | (0x80u | trk_midi_ch(trk_index(t))) << 8 | (note & 0x7Fu) << 16);
++}
++
++/* the notes the sequencer sounds on track t end on MIDI OUT only (panic, MIDI IN overflow: voice.c trk_all_off ends them) */
++static void seq_midi_flush(track_t *t)
++{
++    uint32_t i, n = t->seq_n > 4u + NLANE ? 4u + NLANE : t->seq_n;
++    for (i = 0; i < n; i++)
++        midi_out_event(0x08u | (0x80u | trk_midi_ch(trk_index(t))) << 8 | ((uint32_t)t->seq_notes[i] & 0x7Fu) << 16);
++}
++
+ static void seq_release(track_t *t)
+ {
+     uint32_t i;
+     for (i = 0; i < t->seq_n; i++)
+-        trk_note_off(t, t->seq_notes[i]);
++        seq_note_off(t, t->seq_notes[i]);   /* JSM sequence improvement: MIDI OUT too */
+     t->seq_n = 0;
+     t->seq_hold = 0;
+     t->slide_glide = 0;                             /* live MONO / LEG keys must not glide after it */
+@@ -1058,7 +1083,7 @@
+             if (i < s->n) {
+                 kept |= 1u << i; /* La note continue */
+             } else {
+-                trk_note_off(t, old[j]); /* La note s'arrête */
++                seq_note_off(t, old[j]); /* La note s'arrête */   /* JSM sequence improvement: MIDI OUT */
+             }
+         }
+ 
+@@ -1067,7 +1092,7 @@
+         /* Déclencher uniquement les notes du pas qui ne sont PAS marquées comme "continuant" */
+         for (i = 0; i < s->n; i++) {
+             if (!((kept >> i) & 1u) && !((skip >> i) & 1u)) {
+-                trk_note_on(t, s->note[i], vel);
++                seq_note_on(t, s->note[i], vel);   /* JSM sequence improvement: MIDI OUT */
+             }
+         }
+ 
+@@ -1123,7 +1148,7 @@
+ 
+     for (i = 0; i < m; i++) {
+         if (!((sk >> i) & 1u))
+-            trk_note_on(t, nn[i], vv[i]);
++            seq_note_on(t, nn[i], vv[i]);   /* JSM sequence improvement: MIDI OUT */
+     }
+ 
+     if (slide_in) {
+@@ -1131,7 +1156,7 @@
+             for (j = 0; j < m && nn[j] != t->seq_notes[i]; j++)
+                 ;
+             if (j == m)
+-                trk_note_off(t, t->seq_notes[i]);
++                seq_note_off(t, t->seq_notes[i]);   /* JSM sequence improvement: MIDI OUT */
+         }
+     }
+ 
+@@ -1490,6 +1515,7 @@
+         memset(mchord, 0, sizeof mchord);
+         midi_hint = 0;
+         for (i = 0; i < NTRK; i++) {
++            seq_midi_flush(&trk[i]);                   /* JSM sequence improvement: MIDI OUT */
+             trk[i].rh_n = trk[i].rskip_n = 0;
+             trk[i].seq_n = trk[i].seq_hold = trk[i].slide_glide = trk[i].rat_left = 0;
+         }
+@@ -1501,6 +1527,7 @@
+         track_t *t = &trk[i];
+         if ((pr >> i) & 1u) {
+             midi_forget_track(i);
++            seq_midi_flush(t);                        /* JSM sequence improvement: MIDI OUT */
+             trk_all_off(t);
+             t->nheld = 0;
+             t->arp_phys = 0;
+--- a/ui.c
++++ b/ui.c
+@@ -589,6 +589,151 @@
+     return n;
+ }
+ 
++/* JSM sequence improvement */
++/* SMART CLEAR (EDIT on SEQ > STEP / 1NOTE). A step's notes can be chained in two ways:
++ *  - TIE steps after a NOTE step hold its notes (chain: the last NOTE step before them);
++ *  - polyphonic overdub (seq.c rec_note / chain_end): bit k of the flags, SF_CONT(k), says note[k] is HELD from the
++ *    step before (not retriggered) when that note sounds there.
++ * Clearing a step must not leave TIEs, held notes or CHANCEs hanging in the void after it (see step_clear_smart). */
++
++/* the notes of the step before idx that sound into it: the last non-TIE step before it (as seq.c chain_notes) */
++static uint32_t smart_prev_notes(const track_t *t, uint32_t idx, uint8_t *out)
++{
++    uint32_t len = (uint32_t)clamp(t->p[P_SLEN], 1, NSTEP), k, i;
++    for (k = 1; k < len; k++) {
++        const step_t *s = &t->step[(idx + len - k) % len];
++        if (s->time == ST_TIE)
++            continue;
++        if (s->time == ST_NOTE && s->n && s->n <= 4u) {
++            for (i = 0; i < s->n; i++)
++                out[i] = s->note[i];
++            return s->n;
++        }
++        return 0;
++    }
++    return 0;
++}
++
++/* bit k: note k of step idx is really held from the step before (its SF_CONT bit AND that note sounds there; bits 3..6
++ * of the flags are shared with RATCH / NUDGE in core.h, so the flag alone is not trusted) */
++static uint32_t smart_held(const track_t *t, uint32_t idx)
++{
++    const step_t *s = &t->step[idx];
++    uint8_t prev[4];
++    uint32_t np, k, j, m = 0;
++    if (s->time != ST_NOTE || !s->n || !(s->flags & SF_CONT_ALL))
++        return 0;
++    np = smart_prev_notes(t, idx, prev);
++    for (k = 0; k < s->n && k < 4u; k++) {
++        if (!(s->flags & SF_CONT(k)))
++            continue;
++        for (j = 0; j < np && prev[j] != s->note[k]; j++)
++            ;
++        if (j < np)
++            m |= 1u << k;
++    }
++    return m;
++}
++
++/* remove the notes whose bit is set in mask from the step's array: the others move up, with their SF_CONT bit */
++static void step_drop_notes(step_t *s, uint32_t mask)
++{
++    uint8_t nn[4] = {0, 0, 0, 0};
++    uint32_t k, j = 0, cont = 0;
++    for (k = 0; k < s->n && k < 4u; k++) {
++        if ((mask >> k) & 1u)
++            continue;
++        nn[j] = s->note[k];
++        if (s->flags & SF_CONT(k))
++            cont |= SF_CONT(j);
++        j++;
++    }
++    for (k = 0; k < 4u; k++)
++        s->note[k] = nn[k];
++    s->n = (uint8_t)j;
++    s->flags = (uint8_t)((s->flags & ~SF_CONT_ALL) | cont);
++}
++
++/* idx has lost the notes dead[0..nd): follow what depended on them over the steps after it (wrapping, as the
++ * sequencer): a TIE that ties nothing any more is cleared with its CHANCE; a step holding a dead note (SF_CONT) loses
++ * it, and is cleared too when nothing else is left in it; it stops at the first step that has its own notes
++ * with nothing dead left to hold, or at a REST. carried: idx still has notes that the TIEs after it hold */
++static void smart_follow(track_t *t, uint32_t idx, uint8_t *dead, uint32_t nd, uint32_t carried)
++{
++    uint32_t len = (uint32_t)clamp(t->p[P_SLEN], 1, NSTEP), k, i, j;
++    for (k = 1; k < len; k++) {
++        step_t *s = &t->step[(idx + k) % len];
++        uint8_t gone[4];
++        uint32_t drop = 0, ng = 0;
++        if (s->time == ST_TIE) {
++            if (carried) {                              /* a valid tie: it holds the notes that remain */
++                if (!nd)
++                    break;
++                continue;
++            }
++            step_clear(s);                              /* a tie to nothing (and its chance) */
++            continue;
++        }
++        if (s->time != ST_NOTE || (!s->n && !s->hit))   /* a REST: nothing goes on over it */
++            break;
++        for (i = 0; i < s->n && i < 4u; i++) {          /* notes held from the dead ones */
++            if (!(s->flags & SF_CONT(i)))
++                continue;
++            for (j = 0; j < nd && dead[j] != s->note[i]; j++)
++                ;
++            if (j < nd) {
++                drop |= 1u << i;
++                gone[ng++] = s->note[i];
++            }
++        }
++        if (drop)
++            step_drop_notes(s, drop);
++        for (i = 0; i < ng; i++)                        /* they stay dead for the steps after */
++            dead[i] = gone[i];
++        nd = ng;
++        if (!s->n && !s->hit) {                         /* nothing left but held notes: no step any more */
++            step_clear(s);
++            carried = 0;
++        } else {
++            carried = 1;
++        }
++        if (!nd && carried)
++            break;
++    }
++}
++
++/* EDIT on a melodic step. 1: the step had several notes and some were held from the step before: only those are
++ * removed (the step stays, with the others; "EXTRA NOTES CLEARED"). 0: the step is cleared (as step_clear) and what
++ * depended on it with it (TIEs, held notes, chances: "NOTE(S) CLEARED"). A DRUM track clears the step as before */
++static uint32_t step_clear_smart(track_t *t, uint32_t idx)
++{
++    step_t *s = &t->step[idx];
++    uint8_t dead[4] = {0, 0, 0, 0};
++    uint32_t held, nd = 0, i;
++    if (drum_track(t)) {
++        step_clear(s);
++        return 0;
++    }
++    held = smart_held(t, idx);
++    if (s->n > 1u && held && held != (1u << s->n) - 1u) {
++        for (i = 0; i < s->n && i < 4u; i++)
++            if ((held >> i) & 1u)
++                dead[nd++] = s->note[i];
++        step_drop_notes(s, held);
++        smart_follow(t, idx, dead, nd, 1);
++        return 1;
++    }
++    if (s->time == ST_NOTE) {                           /* every note of the step ends here */
++        for (i = 0; i < s->n && i < 4u; i++)
++            dead[nd++] = s->note[i];
++    } else if (s->time == ST_TIE) {                     /* a TIE: the notes that were held over it */
++        nd = smart_prev_notes(t, idx, dead);
++    }
++    step_clear(s);
++    smart_follow(t, idx, dead, nd, 0);
++    return 0;
++}
++
+ /* ------------------------------------------------------- the DRUM grid --- */
+ /* SEQ > STEP on a DRUM track is the grid: 8 lanes x the 16 steps of a page. The white keys are the
+  * steps of the page shown (a tap toggles the selected lane there), black keys 1..8 select the lane (and play
+--- a/ui_draw.c
++++ b/ui_draw.c
+@@ -834,11 +834,26 @@
+         str_cpy(b, e->presets[t->preset % e->npresets].name, 16);
+ }
+ 
++/* JSM sequence improvement */
++/* the 16-step bank the footer shows. The piano roll (GR_ROLL, melodic or DRUM grid) keeps ui.bank: ui.c follow_poll drives
++ * it there, with its hold while a step is edited, so footer and roll stay on the same page. On every other page, while
++ * the transport plays, the footer follows the playhead from page to page of 16 steps; stopped: ui.bank as before */
++static uint32_t foot_bank(const track_t *t)
++{
++    uint32_t len = (uint32_t)clamp(t->p[P_SLEN], 1, NSTEP), pg = t->seq_idx / 16u;
++    if (!song.playing || len <= 16u || pg >= (len + 15u) / 16u)
++        return ui.bank;
++    if (!ui.home && !ui.menu && !ui.confirm && cur_page()->graph == GR_ROLL)
++        return ui.bank;
++    return pg;
++}
++
+ static void draw_foot(void)
+ {
+     char s[48], pn[16], ti[20], ln[24];
+     const track_t *t = TSEL;
+     uint32_t sig;
++    const uint32_t fb = foot_bank(t);                  /* JSM sequence improvement: the bank of the footer's 16 steps */
+     const page_t *pg = cur_page();
+     const engine_t *e = ENGINES[TSEL->eng_req % NENGINES];
+     const char *ename = e->name, *help;
+@@ -854,10 +869,10 @@
+     str_cpy(s + str_len(s), pn, 16);
+     str_cpy(s + str_len(s), ti, sizeof ti);
+     {   /* step markers: the playhead only when it is in the shown bank, the cursor only in SEQ */
+-        uint32_t ph = song.playing && t->seq_idx / 16u == ui.bank ? t->seq_idx : 0xFFu;
++        uint32_t ph = song.playing && t->seq_idx / 16u == fb ? t->seq_idx : 0xFFu;   /* JSM sequence improvement: fb */
+         sig = str_hash(0x9E3779B9u, s) + ph * 97u + (song.seq_mode ? ui.cursor : 0xFFu) * 3001u + steps_hash(t) +
+               (ui.home ? 0u : page_icon(pg)) * 7121u +
+-              ui.bank * 7u + (uint32_t)t->p[P_SLEN] * 13u;
++              fb * 7u + (uint32_t)t->p[P_SLEN] * 13u;   /* JSM sequence improvement: fb */
+     }
+     if (act_cols()) {                                  /* the hint, and whether OCT+ would act */
+         char ha[16], hb[16];
+@@ -913,10 +928,10 @@
+             cv_key_hint(232 - kh_w(KC_KEYS, "STEPS"), 2, KC_KEYS, "STEPS", 1, T_BG);   /* the keys are the steps */
+     } else {
+         uint32_t i;
+-        if ((ui.bank + 1u) * 16u <= (uint32_t)t->p[P_SLEN])
++        if ((fb + 1u) * 16u <= (uint32_t)t->p[P_SLEN])   /* JSM sequence improvement: fb */
+             GFX_HOOK_ALIGN(0, 0, 240, 0, AL_H | AL_CELLS | AL_N(16), "footer step bars centred");
+         for (i = 0; i < 16u; i++) {                   /* row 1: the cursor's bank, 16 bars in 4 groups */
+-            uint32_t si = ui.bank * 16u + i;
++            uint32_t si = fb * 16u + i;               /* JSM sequence improvement: fb */
+             int32_t sx = bar_x(i);                    /* (centred: x 12 .. 228) */
+             const step_t *st = &seq_steps(t)[si];
+             if (si >= (uint32_t)t->p[P_SLEN])
+--- a/ui_input.c
++++ b/ui_input.c
+@@ -886,6 +886,27 @@
+     ui_message("STEP RESET");
+ }
+ 
++/* JSM sequence improvement */
++/* GR_1NOTE, KNOB 1: the cursor jumps to the next step that holds notes (n != 0) in the direction of the turn, wrapping
++ * round the pattern, once per detent; with no other note in the pattern it moves one step, as before */
++static int32_t note_jump(int32_t steps)
++{
++    int32_t len = (int32_t)clamp(TSEL->p[P_SLEN], 1, NSTEP), dir = steps < 0 ? -1 : 1, left = steps < 0 ? -steps : steps;
++    int32_t cur = (int32_t)ui.cursor, k;
++    while (left-- > 0) {
++        int32_t nxt = cur + dir;
++        for (k = 1; k < len; k++) {
++            int32_t c = ((cur + dir * k) % len + len) % len;
++            if (TSEL->step[c].n) {
++                nxt = c;
++                break;
++            }
++        }
++        cur = (nxt % len + len) % len;
++    }
++    return cur;
++}
++
+ static void step_edit(uint32_t slot, int32_t steps)
+ {
+     step_t *st = &TSEL->step[ui.cursor];
+@@ -903,6 +924,11 @@
+         follow_hold();                                    /* (1.6, #242: editing the cursor's step: it stays on the screen) */
+     switch (slot) {
+     case 0:                                               /* STEP: the cursor */
++        /* JSM sequence improvement: GR_1NOTE jumps from note to note */
++        if (cur_page()->graph == GR_1NOTE) {
++            cursor_move(note_jump(steps));
++            break;
++        }
+         cursor_move(ui.cursor + steps);
+         break;
+     case 1:                                               /* NOTE: transpose the step */
+@@ -1352,10 +1378,14 @@
+             lock_clear(held);
+             return 1;
+         }
+-        step_clear(&TSEL->step[ui.cursor]);
++        /* JSM sequence improvement: smart clear (ui.c step_clear_smart) */
++        if (step_clear_smart(TSEL, ui.cursor)) {        /* only the held notes went: the step stays under the cursor */
++            ui_message("EXTRA NOTES CLEARED");
++            return 1;
++        }
+         (void)motion_clear_locks(TSEL, ui.cursor);
+         cursor_set(ui.cursor + 1);
+-        ui_message("STEP CLEARED");
++        ui_message("NOTE(S) CLEARED");
+         return 1;
+     }
+     if (b == B_EDIT && !ui.home && cur_page()->graph == GR_EVENTS) {   /* AUTOMATION: EDIT deletes the row's record */

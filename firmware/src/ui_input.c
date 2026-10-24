@@ -886,6 +886,27 @@ static void sd_reset(void)
     ui_message("STEP RESET");
 }
 
+/* JSM sequence improvement */
+/* GR_1NOTE, KNOB 1: the cursor jumps to the next step that holds notes (n != 0) in the direction of the turn, wrapping
+ * round the pattern, once per detent; with no other note in the pattern it moves one step, as before */
+static int32_t note_jump(int32_t steps)
+{
+    int32_t len = (int32_t)clamp(TSEL->p[P_SLEN], 1, NSTEP), dir = steps < 0 ? -1 : 1, left = steps < 0 ? -steps : steps;
+    int32_t cur = (int32_t)ui.cursor, k;
+    while (left-- > 0) {
+        int32_t nxt = cur + dir;
+        for (k = 1; k < len; k++) {
+            int32_t c = ((cur + dir * k) % len + len) % len;
+            if (TSEL->step[c].n) {
+                nxt = c;
+                break;
+            }
+        }
+        cur = (nxt % len + len) % len;
+    }
+    return cur;
+}
+
 static void step_edit(uint32_t slot, int32_t steps)
 {
     step_t *st = &TSEL->step[ui.cursor];
@@ -903,6 +924,11 @@ static void step_edit(uint32_t slot, int32_t steps)
         follow_hold();                                    /* (1.6, #242: editing the cursor's step: it stays on the screen) */
     switch (slot) {
     case 0:                                               /* STEP: the cursor */
+        /* JSM sequence improvement: GR_1NOTE jumps from note to note */
+        if (cur_page()->graph == GR_1NOTE) {
+            cursor_move(note_jump(steps));
+            break;
+        }
         cursor_move(ui.cursor + steps);
         break;
     case 1:                                               /* NOTE: transpose the step */
@@ -1352,10 +1378,14 @@ static int page_tap(uint32_t b)
             lock_clear(held);
             return 1;
         }
-        step_clear(&TSEL->step[ui.cursor]);
+        /* JSM sequence improvement: smart clear (ui.c step_clear_smart) */
+        if (step_clear_smart(TSEL, ui.cursor)) {        /* only the held notes went: the step stays under the cursor */
+            ui_message("EXTRA NOTES CLEARED");
+            return 1;
+        }
         (void)motion_clear_locks(TSEL, ui.cursor);
         cursor_set(ui.cursor + 1);
-        ui_message("STEP CLEARED");
+        ui_message("NOTE(S) CLEARED");
         return 1;
     }
     if (b == B_EDIT && !ui.home && cur_page()->graph == GR_EVENTS) {   /* AUTOMATION: EDIT deletes the row's record */
