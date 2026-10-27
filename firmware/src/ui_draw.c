@@ -1748,8 +1748,8 @@ static void ui_draw_page(uint32_t counting)
         page_entered();
     }
     cursor_fix();
-    if (msg_big_changed())
-        ui.force = 1;
+    /*if (msg_big_changed())
+        ui.force = 1;*/
     if (ui.force)
         draw_frame();
     felucca_dbg.stage = 3;
@@ -1774,7 +1774,7 @@ static void ui_draw_page(uint32_t counting)
         ui.help_t--;
     felucca_dbg.stage = 6;
     draw_foot();
-    draw_msg_big();
+    //draw_msg_big(); // JSM Screen flashes with the current implementation, not good
 
     ui.force = 0;
 }
