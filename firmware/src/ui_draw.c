@@ -458,7 +458,8 @@ static void draw_frame(void)
     gap_rows(H_HEAD, Y_LABEL);
     gap_rows(Y_LABEL + ch, gy);
     gap_rows(gy + gh, Y_FOOT);
-    draw_gaps(Y_LABEL, ch);
+    if (large_kind() != LK_TALL)      /* tall: les lignes font 240 px, pas de gouttières */
+        draw_gaps(Y_LABEL, ch);
 }
 
 #ifndef CARD_HOOK
