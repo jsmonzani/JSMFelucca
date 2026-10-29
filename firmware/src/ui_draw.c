@@ -452,16 +452,21 @@ static void draw_gaps(uint32_t y, uint32_t h)
     }
 }
 /* full redraw: the strips (header, cards, panel, footer) cover the rest; only the BG between them is filled */
+/* JSM modification */
 static void draw_frame(void)
 {
-    uint32_t ch = card_h(), gy = graph_y(), gh = graph_h();   /* (MENU > LARGE: tall cards, a strip) */
+    uint32_t ch = card_h(), gy = graph_y(), gh = graph_h();
     gap_rows(H_HEAD, Y_LABEL);
-    gap_rows(Y_LABEL + ch, gy);
-    gap_rows(gy + gh, Y_FOOT);
-    if (large_kind() != LK_TALL)      /* tall: les lignes font 240 px, pas de gouttières */
+    if (large_kind() == LK_TALL) {
+        uint32_t end = Y_LABEL + 4u * LG_CARD_H;     /* fin réelle des 4 lignes */
+        if (gy > end)
+            gap_rows(end, gy);                       /* seulement s'il reste un vrai espace */
+    } else {
+        gap_rows(Y_LABEL + ch, gy);
         draw_gaps(Y_LABEL, ch);
+    }
+    gap_rows(gy + gh, Y_FOOT);
 }
-
 #ifndef CARD_HOOK
 #define CARD_HOOK(v, u) ((void)0)                       /* host: a card value set in S (M too wide with its unit) */
 #endif
@@ -622,7 +627,7 @@ static void draw_column_tall(uint32_t c, const char *label, const char *val, con
             GFX_HOOK_ALIGN(x0, y0, x0 + cw + 4, y0 + chh + 4, AL_HV, "row label chip (MONO hot)");
             row_text_l(0, ROW_LAB_W, label, T_INK, T_ACCENT, ROW_LEFT);
         } else {
-            row_text_l(0, ROW_LAB_W, label, lc, T_SURF, ROW_LEFT);
+            row_text_l(0, ROW_LAB_W, label, lc, T_BG, ROW_LEFT);
         }
     }
 
@@ -634,7 +639,7 @@ static void draw_column_tall(uint32_t c, const char *label, const char *val, con
                   vc == T_ACCENT || vc == T_DIM ? vc : T_KEY, T_INK, T_SURF);
     } else if (val[0]) {
         LARGE_HOOK(val, large_face_has(val) ? 0 : 1);   /* (1: a glyph not in L: add it to L_CHARS) */
-        row_text_l(ROW_VAL_X, ROW_VAL_W, val, vc, T_SURF, ROW_RIGHT);
+        row_text_l(ROW_VAL_X, ROW_VAL_W, val, vc, T_BG, ROW_RIGHT);
     }
 
     /* 3. the unit (S), centred in its cell (10 %) */
@@ -644,7 +649,7 @@ static void draw_column_tall(uint32_t c, const char *label, const char *val, con
             cv_text_fit(ROW_UNI_X, uy, &AF_S, unit, T_MID, T_SURF, ROW_UNI_W);
         } else {
             GFX_HOOK_ALIGN(ROW_UNI_X, 0, ROW_UNI_X + ROW_UNI_W, ROW_BODY_H, AL_HV, "row unit centred");
-            cv_text_in(ROW_UNI_X, uy, ROW_UNI_W, &AF_S, unit, T_MID, T_SURF);
+            cv_text_in(ROW_UNI_X, uy, ROW_UNI_W, &AF_S, unit, T_MID, T_BG);
         }
     }
 
